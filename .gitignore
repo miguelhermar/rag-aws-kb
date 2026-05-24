@@ -53,3 +53,24 @@ Thumbs.db
 *.tmp
 *.temp
 *.bak
+
+# AWS CDK
+cdk.out/
+cdk.context.json
+cdk-outputs.json
+.cdk.staging/
+
+# Streamlit client secrets (the .example file IS committed)
+streamlit_client/.streamlit/secrets.toml
+
+# Lambda container build artifacts
+lambda/.aws-sam/
+*.zip
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local eval output (the committed eval_results.md is intentional, this is for re-runs)
+tests/eval/eval_results.local.md

@@ -1,0 +1,6 @@
+.venv/
+cdk.out/
+cdk.context.json
+.cdk.staging/
+__pycache__/
+*.py[cod]
