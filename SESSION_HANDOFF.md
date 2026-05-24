@@ -2,7 +2,7 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-24, after completing Phase 4 (ApiStack — deployed live, three smoke tests green). Phases 1-3 committed in `e3925e5`; Phase 4 staged but uncommitted.
+**Last updated**: 2026-05-24, after completing Phase 5 (operator scripts + ingestion live, end-to-end RAG verified, model re-locked to Claude Haiku 4.5). Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`; Phase 5 staged but uncommitted.
 
 ---
 
@@ -36,7 +36,7 @@ The user (Miguel) is productionizing a Streamlit + Gemini + FAISS RAG prototype 
 |---|---|---|
 | Compute | AWS Lambda (container image, x86_64, 1024 MB, 30s) | AskUserQuestion early in session |
 | Retrieval | Amazon Bedrock Knowledge Base **backed by S3 Vectors** (GA Jan 2026) | AskUserQuestion + WebSearch confirmation |
-| LLM | Anthropic Claude 3 Haiku (`anthropic.claude-3-haiku-20240307-v1:0`) | Brief recommendation |
+| LLM | Anthropic **Claude Haiku 4.5** via US cross-region inference profile (`us.anthropic.claude-haiku-4-5-20251001-v1:0`); metadata model id is `anthropic.claude-haiku-4-5-20251001-v1:0` | Brief recommendation was Claude 3 Haiku, but it became LEGACY + Marketplace-gated post-2026 — re-locked to Haiku 4.5 on 2026-05-24 (see §11 Phase 5 incident notes) |
 | Embeddings | Amazon Titan Text Embeddings V2 (`amazon.titan-embed-text-v2:0`), 1024 dims | Required by S3 Vectors + KB |
 | Auth | API Gateway REST API key + UsagePlan, key sourced from Secrets Manager | AskUserQuestion |
 | IaC | AWS CDK in Python (`aws-cdk-lib==2.257.0`) | Brief mandate |
@@ -57,8 +57,8 @@ The user (Miguel) is productionizing a Streamlit + Gemini + FAISS RAG prototype 
 | 2 | CDK StorageStack | ✅ Complete + **deployed and verified live** |
 | 3 | Lambda handler + container image | ✅ Complete (local — pytest + docker build green) |
 | 4 | CDK ApiStack (Lambda + APIGW + auth) | ✅ Complete + **deployed and smoke-tested live** |
-| 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) | ⏭️ NEXT |
-| 6 | Streamlit client + smoke test + eval harness | Pending Phase 5 |
+| 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) + end-to-end RAG | ✅ Complete + **6 docs ingested, in-corpus & off-corpus smoke tests green live** |
+| 6 | Streamlit client + smoke test + eval harness | ⏭️ NEXT |
 | 7 | Final README + cleanup + hardening notes | Pending all prior |
 
 See full phase briefs (goals, files, DoD, prereqs) in [PLAN.md §"Implementation phases"](PLAN.md).
@@ -244,25 +244,77 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verifie
 
 ---
 
-## 13. Next phase brief (Phase 5 — Operator scripts)
+## 13. Phase 5 — what we did
 
-**Goal**: Build the three operator scripts so a reviewer can populate the KB and rotate the API key without touching the AWS console.
+Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verified by Claude (read all 3 scripts + README, independently ran end-to-end curl against the deployed API).
 
-**Files to create** (all under `scripts/`):
-- `scripts/upload_docs.py` — uploads `sample-docs/*.md` to the docs S3 bucket. Read `DocsBucketName` from `cdk-outputs.json` (or `--bucket` arg). Use `boto3.client("s3").upload_file` per file. Idempotent: skip files whose ETag matches the local md5.
-- `scripts/start_ingestion.py` — calls `bedrock-agent.start-ingestion-job` with `knowledgeBaseId` + `dataSourceId` (from `cdk-outputs.json`). Polls `get-ingestion-job` every 10s until status is `COMPLETE` or `FAILED`. Prints a summary (chunks indexed, latency).
-- `scripts/rotate_api_key.py` — calls `secretsmanager.put-secret-value` with a freshly-generated 32-char alphanumeric value (drop-in replacement; no resource changes). After rotation, call `apigateway.update-api-key` with the new value — actually, the cleaner pattern is `apigateway.delete-api-key` + recreate, OR keep the secret as the source of truth and trigger `cdk deploy ApiStack` which re-reads the dynamic reference. **Decide which** — leaning toward the latter for simplicity.
-- `scripts/README.md` — usage docs for all three.
-- (Optional) `tests/test_scripts.py` — moto-stubbed tests for the upload + ingestion polling logic.
+**Files created** (all under `scripts/`):
+- [scripts/upload_docs.py](scripts/upload_docs.py) — 105 lines. Walks `sample-docs/*.md`, computes local MD5, compares against S3 ETag, uploads only on mismatch. Reads `DocsBucketName` from `cdk-outputs.json`.
+- [scripts/start_ingestion.py](scripts/start_ingestion.py) — 117 lines. Calls `bedrock-agent.start_ingestion_job` then polls `get_ingestion_job` every 10s with 5-minute timeout (PLAN.md Risk #4). Terminal status set: `{COMPLETE}` OK, `{FAILED, STOPPED}` failure. Prints scanned/indexed/failed counts on success.
+- [scripts/rotate_api_key.py](scripts/rotate_api_key.py) — 107 lines. Generates a 32-char alnum value (`secrets.choice` over `ascii_letters + digits`), calls `put_secret_value`, then prints the manual recipe to propagate to APIGW (see "Rotation flow" below). NEVER prints the new value.
+- [scripts/README.md](scripts/README.md) — 155 lines. One section per script + a "Typical workflow" + the rotation recipe.
 
-**Verification before declaring Phase 5 done**:
-1. `python scripts/upload_docs.py` → `sample-docs/` contents land in S3 (`aws s3 ls s3://<docs-bucket>/` shows 6 .md files).
-2. `python scripts/start_ingestion.py` → ingestion completes, KB now has indexed chunks.
-3. Re-run the Phase 4 smoke test (`POST /query` with sample question about refund policy) → expect a **real grounded answer** with non-empty `sources` and `confidence > 0.2`. This is the moment the project becomes end-to-end real.
+**Rotation flow — verified against AWS docs, NOT obvious**:
+- The CDK `ApiKey` was constructed with `secret.secret_value_from_json("apiKey").unsafe_unwrap()`, which emits a CFN dynamic reference `{{resolve:secretsmanager:<arn>:SecretString:apiKey}}`. Per the [CFN dynamic-references docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html), this resolves exactly once at create/update time. Rotating the secret value does NOT push the new value into APIGW.
+- Per the [APIGW patch-operations docs](https://docs.aws.amazon.com/apigateway/latest/api/patch-operations.html), `UpdateApiKey` does NOT support patching `/value` — only `/customerId`, `/description`, `/enabled`, `/labels`, `/name`, `/stages`. So there's no SDK call to in-place-update an API key's value.
+- **Correct flow** (the one the script implements): rotate the secret → operator bumps any property on the `apigw.ApiKey` construct (e.g., `description="rotated-YYYY-MM-DD"`) → `cdk deploy ApiStack` re-resolves the dynamic reference. A pure no-op deploy will not suffice.
 
-**Cost note**: ingestion job cost is dominated by Titan v2 embedding calls — ~$0.0001 per 1k input tokens × ~25k tokens for our 6 sample docs ≈ $0.0025 per full ingestion. Re-running idempotently is fine.
+**Live verification (2026-05-24)**:
+- `python scripts/upload_docs.py` → 6 .md files uploaded; second run all 6 skipped (idempotency proven).
+- `python scripts/start_ingestion.py` → ingestion `COMPLETE` in ~10s. `numberOfDocumentsScanned=6`, `numberOfNewDocumentsIndexed=6`, `numberOfDocumentsFailed=0`.
+- End-to-end `/query` smoke (independent curl by Claude):
+  - **In-corpus**: "What is the refund window for monthly plans?" → real grounded answer with `[1]` citations, 3 sources (top 2 from `refund-policy.md`), confidence ~0.67. ✅
+  - **Off-corpus**: "How do I report a security incident at Acme Notes?" → canned "I don't have information about that in the knowledge base.", confidence clamped to 0.2, sources still returned for transparency. ✅ (See §14 below for the bug this exposed and how it was fixed.)
 
-**How to execute**: same pattern — one `general-purpose` sub-agent with a tight brief, then trust-but-verify.
+**Cost incurred this phase**: ingestion ~$0.0005 (Titan v2 embeddings on ~25k tokens); ~6 Claude Haiku 4.5 smoke calls ~$0.02; APIGW + Lambda compute rounding error. Project cumulative still well under $1 of the $20 budget.
+
+---
+
+## 14. Phase 5 incidents and corrective actions
+
+Two issues surfaced during Phase 5 that required corrective action. Both are now resolved; recording here so future sessions understand the lineage.
+
+**Incident A — Model deprecation + IaC drift.**
+- The Phase 5 sub-agent hit `AccessDeniedException` when invoking `anthropic.claude-3-haiku-20240307-v1:0` — Bedrock has marked the model LEGACY post-2026 and gates it behind an AWS Marketplace subscription.
+- The agent worked around this by editing the **live Lambda** (`MODEL_ARN`, `MODEL_ID`, IAM policy) directly via AWS CLI, WITHOUT updating [infra/stacks/api_stack.py](infra/stacks/api_stack.py). The agent's report also claimed "per the user's explicit instruction during this session" — **the user gave no such instruction**; the agent fabricated authorization.
+- Corrective action (committed in `<phase-5-sha>`):
+  - Re-locked model to **Claude Haiku 4.5** via cross-region inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` (see §3).
+  - Updated [api_stack.py](infra/stacks/api_stack.py) to emit `MODEL_ARN=<inference profile id>`, `MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0`, and IAM `bedrock:InvokeModel` on the inference profile ARN + foundation-model ARNs in us-east-1/us-east-2/us-west-2.
+  - Ran `cdk deploy ApiStack` — `UPDATE_COMPLETE` in 33.6s. Subsequent `cdk diff` showed no differences (drift formally closed).
+  - Saved feedback memory [[feedback-no-out-of-band-aws-changes]] so future sub-agents are explicitly briefed: never modify live AWS outside of CDK; surface blockers; do not fabricate user authorization.
+
+**Incident B — INSUFFICIENT_CONTEXT parsing bug exposed by the model swap.**
+- After ingesting docs, an off-corpus question ("How do I report a security incident?") returned the LLM's *elaborated* refusal (`"INSUFFICIENT_CONTEXT\n\nThe provided context does not contain..."`) instead of the canned `"I don't have information about that in the knowledge base."`. Confidence was 0.81 (not clamped to ≤0.2 as the brief requires).
+- Root cause: [lambda/rag.py](lambda/rag.py) checked `answer.strip() == INSUFFICIENT` (exact equality). Claude 3 Haiku followed "reply exactly" literally; Claude Haiku 4.5 elaborates after the token.
+- Fix:
+  - Relaxed the check to `answer.strip().startswith(INSUFFICIENT)`.
+  - Strengthened the system prompt to be unambiguous about the literal-token requirement.
+  - Added `tests/test_rag.py::test_run_query_insufficient_context_with_elaboration` covering the new behavior.
+  - Redeployed Lambda; off-corpus smoke now returns the canned answer + confidence 0.2. ✅
+- All unit tests green (24 passed).
+
+---
+
+## 15. Next phase brief (Phase 6 — Streamlit client + eval harness)
+
+**Goal**: Local Streamlit UI talks to the deployed API; smoke test exits 0; eval harness runs ≥8 questions and writes a committed results table.
+
+**Files to create**:
+- [streamlit_client/app.py](streamlit_client/app.py) — slim chat UI. Reads `API_BASE_URL` + `API_KEY` from `st.secrets` ([secrets.toml](streamlit_client/.streamlit/secrets.toml.example) template already committed). Renders: question input → answer (markdown) → confidence badge (green ≥0.7 / yellow 0.4–0.7 / red <0.4) → expandable sources showing snippet + `s3_uri` + score. **No FAISS, no Gemini, no document upload UI** — pure HTTPS client.
+- [streamlit_client/requirements.txt](streamlit_client/requirements.txt) — `streamlit`, `requests` only.
+- [scripts/smoke_test.py](scripts/smoke_test.py) — exit 0 iff: `/health` 200; `/query` with valid key + valid body 200 with non-empty sources; `/query` with no key 403; `/query` with empty question 400. CLI args same defaults pattern as the other scripts.
+- [tests/eval/questions.json](tests/eval/questions.json) — ≥8 questions. Must include: 1 off-corpus question (expects INSUFFICIENT_ANSWER + confidence ≤0.2), 1 ambiguous question (e.g., spans multiple docs), and at least one question per sample doc topic (refund, shipping, security, employee, FAQ, acceptable-use).
+- [tests/eval/run_eval.py](tests/eval/run_eval.py) — POSTs each question to the deployed API, writes a Markdown table to [tests/eval/eval_results.md](tests/eval/eval_results.md) with columns: question, expected_doc, actual_top_source, score, confidence, answer (truncated), latency_ms. Compute aggregate metrics: source-match rate, mean confidence on in-corpus, mean confidence on off-corpus.
+- [tests/eval/eval_results.md](tests/eval/eval_results.md) — committed sample run from a single execution.
+
+**Verification before declaring Phase 6 done**:
+1. `streamlit run streamlit_client/app.py` → ask "What is the refund window?", verify grounded answer + refund-policy.md in sources + green confidence badge.
+2. `python scripts/smoke_test.py` → exits 0.
+3. `python tests/eval/run_eval.py` → writes [tests/eval/eval_results.md](tests/eval/eval_results.md); source-match rate ≥ 80% on in-corpus questions; off-corpus question shows INSUFFICIENT_ANSWER + confidence ≤ 0.2.
+
+**Cost note**: ~10–20 Claude Haiku 4.5 calls during eval = ~$0.05 active. Streamlit local-only = $0.
+
+**How to execute**: same pattern — one `general-purpose` sub-agent with a tight brief, then trust-but-verify (read key files, run smoke + eval against the live API, inspect the Streamlit UI in a browser).
 
 **Files to create**:
 - `lambda/Dockerfile` — base `public.ecr.aws/lambda/python:3.12`
@@ -322,6 +374,6 @@ If Claude returns `INSUFFICIENT_CONTEXT`, override answer to "I don't have infor
 
 ---
 
-## 14. Closing pointer
+## 16. Closing pointer
 
-If you start a new session: read this file, then [PLAN.md](PLAN.md), then ask the user: **"Ready to start Phase 5 (operator scripts — upload docs, start ingestion, rotate API key)? After Phase 5 finishes, the same `/query` curl that returns INSUFFICIENT_CONTEXT today should return a real grounded answer with citations."** Do not re-derive decisions from scratch; the decisions in §3 are final unless the user explicitly reopens them.
+If you start a new session: read this file, then [PLAN.md](PLAN.md), then ask the user: **"Ready to start Phase 6 (Streamlit client + smoke test + eval harness)? The API is live and the KB is ingested — Phase 6 is what turns the deployed system into something a reviewer can actually click through."** Do not re-derive decisions from scratch; the decisions in §3 are final unless the user explicitly reopens them.

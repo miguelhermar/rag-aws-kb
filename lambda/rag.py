@@ -10,9 +10,10 @@ INSUFFICIENT = "INSUFFICIENT_CONTEXT"
 INSUFFICIENT_ANSWER = "I don't have information about that in the knowledge base."
 
 SYSTEM_PROMPT = (
-    "Answer ONLY from provided context. "
-    f"If insufficient, reply exactly `{INSUFFICIENT}`. "
-    "Cite sources as [n]."
+    "Answer ONLY from the provided context. "
+    f"If the context is insufficient to answer the question, your entire response MUST be the single token `{INSUFFICIENT}` "
+    "with no other characters, words, or explanation. "
+    "When you can answer, cite sources inline as [n]."
 )
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -97,7 +98,7 @@ def run_query(
     scores = [c["score"] for c in chunks]
     confidence = compute_confidence(scores)
 
-    if answer.strip() == INSUFFICIENT or not chunks:
+    if answer.strip().startswith(INSUFFICIENT) or not chunks:
         answer = INSUFFICIENT_ANSWER
         confidence = min(confidence, 0.2)
 

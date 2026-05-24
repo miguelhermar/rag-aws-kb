@@ -12,7 +12,7 @@ The intended outcome: a reviewer clones the repo, runs `cdk deploy`, runs two op
 |---|---|---|
 | Compute | **Lambda** (container image, 1024 MB, 30 s) | Free-tier-friendly; honors $20 cap. Fargate path documented for production. |
 | Retrieval | **Bedrock Knowledge Base** backed by **S3 Vectors** (GA Jan 2026) | AWS-native, no OSS/Aurora/Pinecone, lowest cost. |
-| LLM | **Claude 3 Haiku** via Bedrock (`anthropic.claude-3-haiku-20240307-v1:0`) | Cheapest Anthropic model, per brief. |
+| LLM | **Claude Haiku 4.5** via Bedrock cross-region inference profile (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) | Original lock was Claude 3 Haiku (`anthropic.claude-3-haiku-20240307-v1:0`), but it was deprecated to LEGACY post-2026 and now requires an AWS Marketplace subscription. Haiku 4.5 is the current-gen Haiku tier (cheap, fast), no Marketplace gate. Re-locked 2026-05-24. |
 | Embeddings | **Titan Text Embeddings V2** (`amazon.titan-embed-text-v2:0`) | Required by S3 Vectors / KB integration. |
 | Auth | **API Gateway API key + Usage Plan** | Simplest path that meets brief; key sourced from Secrets Manager. |
 | IaC | **AWS CDK in Python** | Per brief. |

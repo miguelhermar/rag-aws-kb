@@ -17,10 +17,15 @@ from constructs import Construct
 
 from infra.stacks.storage_stack import StorageStack
 
-# Claude 3 Haiku in us-east-1. Foundation-model ARNs have no account id.
-HAIKU_MODEL_ARN = (
-    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
-)
+# Claude Haiku 4.5 invoked via the US cross-region inference profile.
+# Claude 3 Haiku (anthropic.claude-3-haiku-20240307-v1:0) was deprecated to LEGACY
+# in Bedrock post-2026 and now requires an AWS Marketplace subscription, so we use
+# the current-generation Haiku tier instead. The inference profile fans out across
+# us-east-1, us-east-2, and us-west-2 for resilience — IAM must allow InvokeModel
+# on the profile ARN AND on the underlying foundation-model ARNs in those 3 regions.
+HAIKU_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0"
+HAIKU_INFERENCE_PROFILE_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+HAIKU_INFERENCE_REGIONS = ("us-east-1", "us-east-2", "us-west-2")
 
 # Path to the lambda/ asset, resolved relative to this file so synth works from any CWD.
 _LAMBDA_ASSET_DIR = os.path.normpath(
@@ -60,7 +65,8 @@ class ApiStack(Stack):
             timeout=Duration.seconds(30),
             environment={
                 "KB_ID": storage_stack.knowledge_base_id,
-                "MODEL_ARN": HAIKU_MODEL_ARN,
+                "MODEL_ARN": HAIKU_INFERENCE_PROFILE_ID,
+                "MODEL_ID": HAIKU_MODEL_ID,
                 "LOG_LEVEL": "INFO",
             },
             log_group=log_group,
@@ -72,10 +78,16 @@ class ApiStack(Stack):
                 resources=[storage_stack.knowledge_base_arn],
             )
         )
+        invoke_model_resources = [
+            f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/{HAIKU_INFERENCE_PROFILE_ID}",
+        ] + [
+            f"arn:aws:bedrock:{r}::foundation-model/{HAIKU_MODEL_ID}"
+            for r in HAIKU_INFERENCE_REGIONS
+        ]
         fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel"],
-                resources=[HAIKU_MODEL_ARN],
+                resources=invoke_model_resources,
             )
         )
 

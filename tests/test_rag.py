@@ -141,7 +141,38 @@ def test_run_query_insufficient_context_override():
             kb_id=KB_ID,
             model_arn=MODEL_ARN,
             request_id="req-x",
-            model_id_for_metadata="anthropic.claude-3-haiku-20240307-v1:0",
+            model_id_for_metadata="anthropic.claude-haiku-4-5-20251001-v1:0",
+            latency_fn=lambda: 100,
+        )
+
+    response = QueryResponse.model_validate(result)
+    assert response.answer == rag.INSUFFICIENT_ANSWER
+    assert response.confidence <= 0.2
+
+
+def test_run_query_insufficient_context_with_elaboration():
+    """Claude 4.5 sometimes emits `INSUFFICIENT_CONTEXT` followed by an explanation.
+    The override must still fire so the API contract is honored regardless of model verbosity.
+    """
+    items = [
+        ("Security policy covers authentication.", 0.78, "s3://b/security-policy.md"),
+        ("Acceptable use governs prohibited activities.", 0.75, "s3://b/acceptable-use.md"),
+    ]
+    elaborated = (
+        "INSUFFICIENT_CONTEXT\n\n"
+        "The provided context does not contain information about incident reporting workflow. "
+        "The documents cover authentication and prohibited activities but not the question asked."
+    )
+    with Stubber(rag.agent_runtime) as agent_stub, Stubber(rag.runtime) as rt_stub:
+        agent_stub.add_response("retrieve", _retrieve_response(items))
+        rt_stub.add_response("invoke_model", _claude_body(elaborated))
+        result = rag.run_query(
+            question="how do I report a security incident?",
+            top_k=5,
+            kb_id=KB_ID,
+            model_arn=MODEL_ARN,
+            request_id="req-y",
+            model_id_for_metadata="anthropic.claude-haiku-4-5-20251001-v1:0",
             latency_fn=lambda: 100,
         )
 
