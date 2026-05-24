@@ -116,7 +116,7 @@ This fix is NOT yet committed. The repo working tree has the fix; if no commit h
 
 ---
 
-## 8. Live AWS state (as of 2026-05-23)
+## 8. Live AWS state (as of 2026-05-24, end of Phase 5)
 
 **Account**: `954863244564`, IAM user `admin_user`, region `us-east-1`.
 
@@ -142,18 +142,19 @@ LambdaFunctionName  = ApiStack-RagHandler014AF978-QJdp1JKQFOE2
 LogGroupName        = /aws/lambda/ApiStack-RagHandler
 ```
 
-**Live status verified via CLI + curl smoke tests (2026-05-24)**:
+**Live status verified via CLI + curl smoke tests (2026-05-24, end of Phase 5)**:
 - KB `W6ZGK8YJWU` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
-- DataSource `91I2LVEI5L` → status `AVAILABLE`, chunking `FIXED_SIZE` ✅
-- Docs bucket → exists, empty (sample-docs not yet uploaded — that's Phase 5) ✅
+- DataSource `91I2LVEI5L` → status `AVAILABLE`, chunking `FIXED_SIZE`; **6/6 sample-docs ingested** (Phase 5) ✅
+- Docs bucket → 6 `.md` files from `sample-docs/` uploaded idempotently via `scripts/upload_docs.py` ✅
 - Vector index `rag-aws-kb-index` → dim=1024, metric=cosine, dtype=float32 ✅
 - API key secret → exists; value is `{"apiKey": "<32 alnum chars>"}` (never printed) ✅
 - **API Gateway**: `curl https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/health` → `200 {"status":"ok"}` ✅
 - **API Gateway auth**: `POST /query` without `x-api-key` → `403 Forbidden` ✅
-- **End-to-end /query**: `POST /query` with valid key + sample question → `200`, schema-valid response, INSUFFICIENT_CONTEXT path because docs aren't ingested yet (expected) ✅
+- **End-to-end /query (in-corpus, "refund window")**: `200` with grounded answer + `[1]` citations, top sources `refund-policy.md` (scores ~0.61), confidence ~0.67 ✅
+- **End-to-end /query (off-corpus, "incident reporting")**: `200` with canned `"I don't have information about that in the knowledge base."`, confidence clamped to 0.2 ✅
 
 **User pre-flight done before deploy**:
-- Enabled Bedrock model access for Titan v2 AND Claude 3 Haiku in us-east-1 console
+- Enabled Bedrock model access for Titan v2 in us-east-1 console (Claude 3 Haiku access was enabled initially but the model became LEGACY post-2026 and gated behind AWS Marketplace; we re-locked to Claude Haiku 4.5 via inference profile — see §3 and §14). The inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` is `ACTIVE` and does not require Marketplace subscription.
 - Ran `cdk bootstrap aws://954863244564/us-east-1` (CDKToolkit stack exists)
 
 **Cost incurred so far**: <$0.10 total (docker build + ECR push + smoke test invocations). Idle cost going forward ≈$0.40/month (Secrets Manager flat fee + ECR storage of the Lambda image, ~50 MB, negligible). Active cost: ~$0.0003 per `/query` (Haiku tokens dominate; APIGW + Lambda compute are rounding error).
@@ -176,25 +177,38 @@ aws sts get-caller-identity   # should show account 954863244564
 aws cloudformation describe-stacks --stack-name StorageStack --region us-east-1 \
   --query 'Stacks[0].StackStatus' --output text   # → CREATE_COMPLETE or UPDATE_COMPLETE
 
-aws bedrock-agent get-knowledge-base --knowledge-base-id QWM9CGVIJL \
+aws bedrock-agent get-knowledge-base --knowledge-base-id W6ZGK8YJWU \
   --region us-east-1 --query 'knowledgeBase.status' --output text   # → ACTIVE
+# (Or read the current id from cdk-outputs.json: jq -r '.StorageStack.KbId' cdk-outputs.json)
 
 # Re-synth (no AWS calls)
-cd infra && cdk synth StorageStack
+cd infra && cdk synth
 
-# Tear down (when done with everything)
-cdk destroy StorageStack --force
+# Live end-to-end smoke (in-corpus question)
+API_URL=$(jq -r '.ApiStack.ApiUrl' cdk-outputs.json)
+SECRET_ARN=$(jq -r '.StorageStack.ApiKeySecretArn' cdk-outputs.json)
+API_KEY=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" \
+  --region us-east-1 --query SecretString --output text \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['apiKey'])")
+curl -s -X POST "${API_URL}query" \
+  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"question":"What is the refund window for monthly plans?","top_k":3}' | jq .
+
+# Tear down (when done with everything — destructive, confirm before running)
+cd infra && cdk destroy ApiStack StorageStack --force
 ```
 
 ---
 
 ## 10. Open items / loose ends
 
-- **Uncommitted changes**: Phase 1 + 2 are NOT committed to git yet. The user has not asked for a commit. Working tree has all the new files + the s3_vectors.py casing fix. Before committing, verify `cdk-outputs.json` is gitignored (it's not currently — consider adding to `.gitignore` since it contains account-specific ARNs; OR commit it as documentation, user's call).
-- **The `.env` at root** still contains a leaked Gemini key (gitignored, so not pushed, but lives on the user's disk). Mention in final README that the new stack does not use Gemini and the user should rotate the key.
-- **`legacy/.streamlit/secrets.toml`** was moved along with the rest of legacy — check if it contains secrets; it's covered by `.gitignore` patterns but worth a glance.
-- **No tests written yet**. First tests come in Phase 3 (pytest on `lambda/schemas.py`).
-- **`venv/`** at repo root is the legacy prototype's venv — gitignored, leave alone.
+- **Commits so far**: `e3925e5` (Phases 1-3), `e7c6d14` (Phase 4 ApiStack), `20add17` (Phase 5 scripts + ingestion + model relock + INSUFFICIENT_CONTEXT fix). Working tree clean at end of session.
+- **The `.env` at root** still contains a leaked Gemini key from the legacy prototype (gitignored, so not pushed, but lives on the user's disk). Mention in the final README (Phase 7) that the new stack does not use Gemini and the key should be rotated/deleted by the user.
+- **`legacy/.streamlit/secrets.toml`** was moved with the rest of `legacy/` — checked, contains only commented-out placeholders, safe.
+- **Tests written**: 24 unit tests in `tests/test_schemas.py` + `tests/test_rag.py` (botocore Stubber, no AWS); 5 synth-time tests in `tests/test_synth.py` (require `aws_cdk` — run via `infra/.venv`). Eval harness (`tests/eval/`) lands in Phase 6.
+- **`venv/`** at repo root is the legacy prototype's venv — gitignored. Convenient because it has pytest + boto3 already installed; used for running the non-synth tests. Leave alone.
+- **`infra/.venv/`** is the CDK venv (has `aws-cdk-lib`, `constructs`). Used for `cdk synth`, `cdk diff`, `cdk deploy`, and `tests/test_synth.py`.
+- **Two python environments** — annoying but works: `venv/` for unit tests + script execution, `infra/.venv/` for CDK. Phase 7 cleanup could consolidate, but it's low-priority.
 
 ---
 
@@ -276,12 +290,13 @@ Two issues surfaced during Phase 5 that required corrective action. Both are now
 
 **Incident A — Model deprecation + IaC drift.**
 - The Phase 5 sub-agent hit `AccessDeniedException` when invoking `anthropic.claude-3-haiku-20240307-v1:0` — Bedrock has marked the model LEGACY post-2026 and gates it behind an AWS Marketplace subscription.
-- The agent worked around this by editing the **live Lambda** (`MODEL_ARN`, `MODEL_ID`, IAM policy) directly via AWS CLI, WITHOUT updating [infra/stacks/api_stack.py](infra/stacks/api_stack.py). The agent's report also claimed "per the user's explicit instruction during this session" — **the user gave no such instruction**; the agent fabricated authorization.
-- Corrective action (committed in `<phase-5-sha>`):
+- The sub-agent asked Miguel directly (in its own tool-use loop, NOT visible in the main agent's context) for guidance, and Miguel authorized the swap to Claude Haiku 4.5 rather than enable the Marketplace subscription. So the model choice itself was authorized — **what was wrong was the mechanism**: the agent applied the change by editing the **live Lambda** (`MODEL_ARN`, `MODEL_ID`, IAM policy) directly via AWS CLI, instead of updating [infra/stacks/api_stack.py](infra/stacks/api_stack.py) and redeploying via CDK. This created IaC drift — the next `cdk deploy ApiStack` would have reverted the change.
+- The main agent (Claude orchestrator) initially read the situation as "fabricated authorization" because it could see the out-of-band change without the side-conversation context. Miguel clarified after the fact. **Lesson for future sessions**: if the main agent suspects a sub-agent is acting without authorization, ASK Miguel to confirm before assuming — sub-agent ↔ user side conversations exist and are real, just not visible in main context. See [[feedback-no-out-of-band-aws-changes]] for the codified rule.
+- Corrective action (committed in `20add17`):
   - Re-locked model to **Claude Haiku 4.5** via cross-region inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` (see §3).
-  - Updated [api_stack.py](infra/stacks/api_stack.py) to emit `MODEL_ARN=<inference profile id>`, `MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0`, and IAM `bedrock:InvokeModel` on the inference profile ARN + foundation-model ARNs in us-east-1/us-east-2/us-west-2.
-  - Ran `cdk deploy ApiStack` — `UPDATE_COMPLETE` in 33.6s. Subsequent `cdk diff` showed no differences (drift formally closed).
-  - Saved feedback memory [[feedback-no-out-of-band-aws-changes]] so future sub-agents are explicitly briefed: never modify live AWS outside of CDK; surface blockers; do not fabricate user authorization.
+  - Updated [api_stack.py](infra/stacks/api_stack.py) to emit `MODEL_ARN=<inference profile id>`, `MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0`, and IAM `bedrock:InvokeModel` on the inference profile ARN + foundation-model ARNs in us-east-1/us-east-2/us-west-2 (the regions the US profile fans out to).
+  - Ran `cdk deploy ApiStack` — `UPDATE_COMPLETE` in 33.6s. Subsequent `cdk diff` showed no differences (drift formally closed; source = CFN template = live).
+  - Saved feedback memory [[feedback-no-out-of-band-aws-changes]] so future sub-agents are explicitly briefed: changes to live AWS go through CDK source only, even when the user authorizes the *change*; the agent should ask for the IaC-vs-out-of-band distinction explicitly if unclear.
 
 **Incident B — INSUFFICIENT_CONTEXT parsing bug exposed by the model swap.**
 - After ingesting docs, an off-corpus question ("How do I report a security incident?") returned the LLM's *elaborated* refusal (`"INSUFFICIENT_CONTEXT\n\nThe provided context does not contain..."`) instead of the canned `"I don't have information about that in the knowledge base."`. Confidence was 0.81 (not clamped to ≤0.2 as the brief requires).
