@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDK app entry point. Phase 2: StorageStack only. ApiStack lands in Phase 4."""
+"""CDK app entry point. Phase 2: StorageStack. Phase 4: ApiStack."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(_INFRA_DIR))
 
 import aws_cdk as cdk  # noqa: E402
 
+from infra.stacks.api_stack import ApiStack  # noqa: E402
 from infra.stacks.storage_stack import StorageStack  # noqa: E402
 
 # Region is locked: S3 Vectors GA regions are limited and Bedrock model availability is widest
@@ -44,11 +45,20 @@ account = (
 
 env = cdk.Environment(account=account, region=REQUIRED_REGION)
 
-StorageStack(
+storage_stack = StorageStack(
     app,
     "StorageStack",
     env=env,
     description="RAG-AWS Phase 2: S3 docs bucket, S3 Vectors index, Bedrock KB, API key secret.",
 )
+
+api_stack = ApiStack(
+    app,
+    "ApiStack",
+    env=env,
+    storage_stack=storage_stack,
+    description="RAG-AWS Phase 4: Lambda container + API Gateway REST API with API-key auth.",
+)
+api_stack.add_dependency(storage_stack)
 
 app.synth()

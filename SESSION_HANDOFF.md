@@ -2,7 +2,7 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-24, after completing Phase 3 (Lambda handler, local-only — 23/23 pytest green, docker build green). Phase 1+2+3 are all uncommitted on the working tree.
+**Last updated**: 2026-05-24, after completing Phase 4 (ApiStack — deployed live, three smoke tests green). Phases 1-3 committed in `e3925e5`; Phase 4 staged but uncommitted.
 
 ---
 
@@ -55,9 +55,9 @@ The user (Miguel) is productionizing a Streamlit + Gemini + FAISS RAG prototype 
 |---|---|---|
 | 1 | Scaffolding + sample docs + legacy move | ✅ Complete |
 | 2 | CDK StorageStack | ✅ Complete + **deployed and verified live** |
-| 3 | Lambda handler + container image | ✅ Complete (local — pytest + docker build green; not yet deployed) |
-| 4 | CDK ApiStack (Lambda + APIGW + auth) | ⏭️ NEXT |
-| 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) | Pending Phase 4 |
+| 3 | Lambda handler + container image | ✅ Complete (local — pytest + docker build green) |
+| 4 | CDK ApiStack (Lambda + APIGW + auth) | ✅ Complete + **deployed and smoke-tested live** |
+| 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) | ⏭️ NEXT |
 | 6 | Streamlit client + smoke test + eval harness | Pending Phase 5 |
 | 7 | Final README + cleanup + hardening notes | Pending all prior |
 
@@ -120,32 +120,43 @@ This fix is NOT yet committed. The repo working tree has the fix; if no commit h
 
 **Account**: `954863244564`, IAM user `admin_user`, region `us-east-1`.
 
-**StorageStack — deployed, 14/14 resources `CREATE_COMPLETE` in 60s.**
+**StorageStack — deployed, `CREATE_COMPLETE`.** (Re-deployed between sessions; original 2026-05-23 IDs are superseded by the values below as of 2026-05-24.)
 
-Outputs written to [cdk-outputs.json](cdk-outputs.json) (gitignored? — check before committing):
+**ApiStack — deployed, 21 resources `CREATE_COMPLETE`, ~197s wall-clock (incl. docker build + ECR push).**
+
+Outputs written to [cdk-outputs.json](cdk-outputs.json) (now gitignored as of `.gitignore` update in commit `e3925e5`):
 ```
-KbId            = QWM9CGVIJL
-KbArn           = arn:aws:bedrock:us-east-1:954863244564:knowledge-base/QWM9CGVIJL
-DataSourceId    = 5ZGJAUZFDT
-DocsBucketName  = storagestack-docsbucketecea003f-xgepmr8l4pya
-DocsBucketArn   = arn:aws:s3:::storagestack-docsbucketecea003f-xgepmr8l4pya
+# StorageStack
+KbId            = W6ZGK8YJWU
+KbArn           = arn:aws:bedrock:us-east-1:954863244564:knowledge-base/W6ZGK8YJWU
+DataSourceId    = 91I2LVEI5L
+DocsBucketName  = storagestack-docsbucketecea003f-jhol3lw1fmxx
+DocsBucketArn   = arn:aws:s3:::storagestack-docsbucketecea003f-jhol3lw1fmxx
 VectorBucketArn = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564
 VectorIndexArn  = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564/index/rag-aws-kb-index
-ApiKeySecretArn = arn:aws:secretsmanager:us-east-1:954863244564:secret:ApiKeySecretF1B08E61-YjyCC7l72VIR-fpS2wI
+ApiKeySecretArn = arn:aws:secretsmanager:us-east-1:954863244564:secret:ApiKeySecretF1B08E61-0oa0AJwle1oP-9HvoqZ
+
+# ApiStack
+ApiUrl              = https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/
+LambdaFunctionName  = ApiStack-RagHandler014AF978-QJdp1JKQFOE2
+LogGroupName        = /aws/lambda/ApiStack-RagHandler
 ```
 
-**Live status verified via CLI**:
-- KB `QWM9CGVIJL` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
-- DataSource `5ZGJAUZFDT` → status `AVAILABLE`, chunking `FIXED_SIZE` ✅
+**Live status verified via CLI + curl smoke tests (2026-05-24)**:
+- KB `W6ZGK8YJWU` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
+- DataSource `91I2LVEI5L` → status `AVAILABLE`, chunking `FIXED_SIZE` ✅
 - Docs bucket → exists, empty (sample-docs not yet uploaded — that's Phase 5) ✅
 - Vector index `rag-aws-kb-index` → dim=1024, metric=cosine, dtype=float32 ✅
 - API key secret → exists; value is `{"apiKey": "<32 alnum chars>"}` (never printed) ✅
+- **API Gateway**: `curl https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/health` → `200 {"status":"ok"}` ✅
+- **API Gateway auth**: `POST /query` without `x-api-key` → `403 Forbidden` ✅
+- **End-to-end /query**: `POST /query` with valid key + sample question → `200`, schema-valid response, INSUFFICIENT_CONTEXT path because docs aren't ingested yet (expected) ✅
 
 **User pre-flight done before deploy**:
 - Enabled Bedrock model access for Titan v2 AND Claude 3 Haiku in us-east-1 console
 - Ran `cdk bootstrap aws://954863244564/us-east-1` (CDKToolkit stack exists)
 
-**Cost incurred**: ≈$0 today. Idle cost going forward ≈$0.40/month (Secrets Manager flat fee). Everything else is pay-per-use.
+**Cost incurred so far**: <$0.10 total (docker build + ECR push + smoke test invocations). Idle cost going forward ≈$0.40/month (Secrets Manager flat fee + ECR storage of the Lambda image, ~50 MB, negligible). Active cost: ~$0.0003 per `/query` (Haiku tokens dominate; APIGW + Lambda compute are rounding error).
 
 ---
 
@@ -213,20 +224,45 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verifie
 
 ---
 
-## 12. Next phase brief (Phase 4 — ApiStack)
+## 12. Phase 4 — what we did
 
-**Goal**: CDK stack that wraps the [lambda/](lambda/) container image into an API Gateway REST API with API-key auth and a usage plan, wired to the live KB from §8.
+Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verified by Claude (read api_stack.py + app.py + test_synth.py, independently called `aws cloudformation describe-stacks` and `curl /health` → 200).
 
-**Files to create**:
-- `infra/stacks/api_stack.py` — defines `lambda_.DockerImageFunction` (asset = `../lambda`), 1024MB / 30s, x86_64; env vars `KB_ID` + `MODEL_ARN` sourced from StorageStack outputs (cross-stack ref via `Fn::ImportValue` or direct CDK reference); least-privilege IAM (only `bedrock:Retrieve` on KB ARN + `bedrock:InvokeModel` on Haiku model ARN + `logs:*`); `apigw.RestApi` with `/health` (no auth) and `/query` (`apiKeyRequired=True`); `UsagePlan` + `ApiKey` whose value is sourced from Secrets Manager (ApiKeySecretArn from §8); CloudWatch log group with 30-day retention.
-- Update `infra/app.py` to instantiate `ApiStack` (taking StorageStack refs).
-- (Optional) `tests/test_synth.py` — snapshot/synth smoke test.
+**Files created/modified**:
+- [infra/stacks/api_stack.py](infra/stacks/api_stack.py) — 144 lines. `DockerImageFunction` (asset = `../lambda`), 1024MB/30s, x86_64; env `KB_ID`+`MODEL_ARN`+`LOG_LEVEL=INFO`; explicit `LogGroup` with 30-day retention (avoids CDK's `log_retention` custom-resource Lambda); least-privilege IAM (`bedrock:Retrieve` on KB ARN only, `bedrock:InvokeModel` on Haiku ARN only); `RestApi` REGIONAL, prod stage, `MethodLoggingLevel.INFO`, metrics on, tracing off; `/health` (no key) + `/query` (key required); `ApiKey` whose value resolves via `secret.secret_value_from_json("apiKey").unsafe_unwrap()` (server-side dynamic ref — value never lands in synth template); `UsagePlan` rate 5/burst 10/quota 1000/day.
+- [infra/app.py](infra/app.py) — instantiates `ApiStack` with cross-stack ref to `StorageStack` (in-memory, NOT `Fn.import_value` — both stacks live in the same `cdk.App`); `api_stack.add_dependency(storage_stack)` to lock deploy order.
+- [tests/test_synth.py](tests/test_synth.py) — 5 pytest synth-time assertions (single Lambda, single RestApi, env contains `KB_ID`+`MODEL_ARN`, `/query` requires key, `/health` does not).
 
-**Then deploy live** — same pattern as Phase 2: `cdk synth ApiStack` then `cdk deploy ApiStack`, then `curl` the `/health` endpoint and a `/query` with the API key to confirm end-to-end.
+**Sub-agent deviations from brief** (all accepted):
+1. **Explicit `LogGroup` instead of `log_retention=` param**: avoids CDK provisioning a `Custom::LogRetention` framework Lambda, which would have meant 2× `AWS::Lambda::Function` in the stack and broken the "exactly 1 Lambda" assertion. Functionally identical, strictly cleaner.
+2. **Smoke-test API-key extraction**: agent used `jq` against `cdk-outputs.json` rather than the hard-coded ARN in the brief, since the StorageStack ARN had rotated. API key was held in a shell variable only; never printed.
 
-**Cost note**: APIGW REST = ~$3.50/M requests (negligible). The Lambda will incur Bedrock InvokeModel cost only on `/query` hits (~$0.00025/1k input tokens for Haiku). Idle cost remains ~$0.40/month (Secrets Manager).
+**Live verification (2026-05-24)** — three curl smoke tests against `https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/`:
+- `GET /health` → `200 {"status":"ok"}` ✅
+- `POST /query` without `x-api-key` → `403 {"message":"Forbidden"}` ✅ (auth wired)
+- `POST /query` with valid key + sample question → `200`, schema-valid JSON, `confidence=0.0`, `sources=[]`, `answer="I don't have information about that in the knowledge base."` ✅ — this is the **expected** behaviour: docs haven't been ingested yet, KB returns 0 chunks, INSUFFICIENT_CONTEXT override fires. Confirms the wiring end-to-end (APIGW → Lambda → Bedrock Retrieve → Bedrock InvokeModel → response). Phase 5 will upload docs + start an ingestion job and the same curl should then return a real grounded answer.
 
-**How to execute**: same pattern — one `general-purpose` sub-agent with a tight brief, then trust-but-verify (read stack files, `cdk synth`, `cdk deploy`, live curl).
+---
+
+## 13. Next phase brief (Phase 5 — Operator scripts)
+
+**Goal**: Build the three operator scripts so a reviewer can populate the KB and rotate the API key without touching the AWS console.
+
+**Files to create** (all under `scripts/`):
+- `scripts/upload_docs.py` — uploads `sample-docs/*.md` to the docs S3 bucket. Read `DocsBucketName` from `cdk-outputs.json` (or `--bucket` arg). Use `boto3.client("s3").upload_file` per file. Idempotent: skip files whose ETag matches the local md5.
+- `scripts/start_ingestion.py` — calls `bedrock-agent.start-ingestion-job` with `knowledgeBaseId` + `dataSourceId` (from `cdk-outputs.json`). Polls `get-ingestion-job` every 10s until status is `COMPLETE` or `FAILED`. Prints a summary (chunks indexed, latency).
+- `scripts/rotate_api_key.py` — calls `secretsmanager.put-secret-value` with a freshly-generated 32-char alphanumeric value (drop-in replacement; no resource changes). After rotation, call `apigateway.update-api-key` with the new value — actually, the cleaner pattern is `apigateway.delete-api-key` + recreate, OR keep the secret as the source of truth and trigger `cdk deploy ApiStack` which re-reads the dynamic reference. **Decide which** — leaning toward the latter for simplicity.
+- `scripts/README.md` — usage docs for all three.
+- (Optional) `tests/test_scripts.py` — moto-stubbed tests for the upload + ingestion polling logic.
+
+**Verification before declaring Phase 5 done**:
+1. `python scripts/upload_docs.py` → `sample-docs/` contents land in S3 (`aws s3 ls s3://<docs-bucket>/` shows 6 .md files).
+2. `python scripts/start_ingestion.py` → ingestion completes, KB now has indexed chunks.
+3. Re-run the Phase 4 smoke test (`POST /query` with sample question about refund policy) → expect a **real grounded answer** with non-empty `sources` and `confidence > 0.2`. This is the moment the project becomes end-to-end real.
+
+**Cost note**: ingestion job cost is dominated by Titan v2 embedding calls — ~$0.0001 per 1k input tokens × ~25k tokens for our 6 sample docs ≈ $0.0025 per full ingestion. Re-running idempotently is fine.
+
+**How to execute**: same pattern — one `general-purpose` sub-agent with a tight brief, then trust-but-verify.
 
 **Files to create**:
 - `lambda/Dockerfile` — base `public.ecr.aws/lambda/python:3.12`
@@ -286,6 +322,6 @@ If Claude returns `INSUFFICIENT_CONTEXT`, override answer to "I don't have infor
 
 ---
 
-## 13. Closing pointer
+## 14. Closing pointer
 
-If you start a new session: read this file, then [PLAN.md](PLAN.md), then ask the user: **"Ready to start Phase 4 (CDK ApiStack — wire the Lambda + APIGW + API-key auth, then deploy live)? Same pattern — sub-agent + trust-but-verify."** Do not re-derive decisions from scratch; the decisions in §3 are final unless the user explicitly reopens them.
+If you start a new session: read this file, then [PLAN.md](PLAN.md), then ask the user: **"Ready to start Phase 5 (operator scripts — upload docs, start ingestion, rotate API key)? After Phase 5 finishes, the same `/query` curl that returns INSUFFICIENT_CONTEXT today should return a real grounded answer with citations."** Do not re-derive decisions from scratch; the decisions in §3 are final unless the user explicitly reopens them.
