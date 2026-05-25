@@ -381,18 +381,21 @@ Done **inline by the Claude orchestrator** (no sub-agent — docs-only synthesis
 
 ---
 
-## 17. Project status — DONE
+## 17. Project status — core DONE, optional extensions pending user election
 
-All 7 phases complete. The deliverable is interview-ready. The system is live in `us-east-1` at the URL in §8 (the README is the canonical doc; this handoff is now mostly an archival record of how we got here).
+All 7 *required* phases complete. The deliverable is interview-ready and the system is live in `us-east-1` at the URL in §8 (the README is the canonical reviewer doc; this handoff is now mostly an archival record of how we got here).
+
+**However**: Miguel has identified a list of *optional extensions* (brief §"Optional extensions") that he is considering implementing in **future fresh sessions**, one at a time, based on what he decides to prioritize. The full candidate list is preserved in [§19](#19-optional-extensions--candidate-list-for-future-sessions) below. Do not implement any of them proactively — wait for Miguel to elect specific ones session-by-session.
 
 The README is the single source of truth for any future reader (reviewer or future-Claude). This handoff doc retains value for:
 - The phase-by-phase build narrative (§5, §6, §11, §12, §13, §15, §16).
 - The two production lessons in §14 (out-of-band-AWS-changes rule + model-deprecation incident).
-- Live resource IDs as last observed (§8) — these are stale the moment the user runs `cdk destroy`.
+- Live resource IDs as last observed (§8) — these are stale the moment Miguel runs `cdk destroy`.
+- **The optional-extension shortlist in §19** — the menu of next moves Miguel is considering.
 
 ---
 
-## 17. Things to remember about this user
+## 18. Things to remember about this user
 
 - They asked to "leverage the compact skill" but there is no literal `/compact` skill — interpret as "write a dense session handoff".
 - They prefer terse, opinionated responses over menus.
@@ -403,14 +406,43 @@ The README is the single source of truth for any future reader (reviewer or futu
 
 ---
 
-## 18. Closing pointer (post-project)
+## 19. Optional extensions — candidate list for future sessions
 
-The project is complete. If you start a new session in this repo:
+Miguel has flagged the following as *optional extensions* to consider for future fresh sessions. **Each is an independent piece of work; Miguel will elect one (or a small batch) per session.** Do not implement any of these unless Miguel explicitly asks for it in the current session. If Miguel asks "what should we work on next?", surface this list and recommend one with the highest ROI for an interview-presentable project, but let him pick.
+
+The list, verbatim from the brief, is:
+
+- CI/CD pipeline for CDK deployment.
+- Separate dev/prod environments.
+- Cognito or enterprise SSO integration.
+- Streaming responses from the API to Streamlit.
+- Upload or ingestion endpoint for new documents.
+- Admin workflow for document management.
+- DynamoDB-backed chat/session history.
+- CloudWatch dashboard or alarms.
+- Tracing with AWS X-Ray or OpenTelemetry.
+- Guardrails or safety filters.
+- Human feedback collection.
+- Cost controls and token usage tracking.
+
+**Notes for future-Claude when one of these is elected**:
+- Most touch infra. The "no out-of-band AWS changes" rule ([[feedback-no-out-of-band-aws-changes]]) still applies — every AWS-affecting change goes through CDK source + `cdk deploy`, with `cdk diff` clean as the success gate.
+- Each extension should probably be its own commit (and own SESSION_HANDOFF.md "Phase 8+" record). Treat them as discrete phases — same brief + sub-agent + trust-but-verify pattern that worked for Phases 2-6.
+- Some are mutually informing (e.g., Cognito JWT + DynamoDB session history naturally pair; CloudWatch dashboard + X-Ray tracing pair; CI/CD + dev/prod envs pair). When Miguel elects one, *ask* if any pairing makes sense before you start.
+- A few interact with [README.md](README.md) production-hardening section (§10) — implementing them moves an item from "documented-but-not-built" to "implemented". Keep that section accurate as items land.
+- The system may or may not be deployed when a future session starts. Check stacks first (see §20 step 4) before assuming any live IDs are valid.
+
+---
+
+## 20. Closing pointer (post-project)
+
+The core project is complete. If you start a new session in this repo:
 
 1. **Read [README.md](README.md) first** — it is now the canonical entry point and supersedes this handoff doc for anything reviewer-facing.
 2. Read this handoff doc only if you need historical context: how decisions were made, what the two production incidents taught us (§14), the phase-by-phase build log.
 3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan.
 4. **Before assuming the live system is up**, check `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` — Miguel may have destroyed the stacks to zero cost after submission.
 5. If asked to extend the project, do not re-litigate decisions in §3 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
+6. **If Miguel asks about "optional extensions" or "what's next"**, point at [§19](#19-optional-extensions--candidate-list-for-future-sessions) and let him pick. Do not implement any of them proactively.
 
-If asked: **"What's left?"** — the answer is "nothing required; only the optional cleanup items in §16."
+If asked: **"What's left?"** — the answer is "nothing *required*; the optional cleanup items are in [§16](#16-phase-7--what-we-did), and the optional-extension menu is in [§19](#19-optional-extensions--candidate-list-for-future-sessions)."
