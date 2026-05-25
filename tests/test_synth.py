@@ -85,10 +85,60 @@ def test_api_stack_has_cognito_authorizer(stacks):
     )
 
 
-def test_api_stack_has_single_lambda(stacks):
+def test_api_stack_has_two_lambdas(stacks):
+    """Phase 9a: buffered REST handler + streaming SSE handler."""
     _, _, _, api = stacks
     template = Template.from_stack(api)
-    template.resource_count_is("AWS::Lambda::Function", 1)
+    template.resource_count_is("AWS::Lambda::Function", 2)
+
+
+def test_api_stack_has_streaming_function_url(stacks):
+    """Phase 9a: exactly one Function URL with InvokeMode=RESPONSE_STREAM and
+    CORS allowing the Streamlit origin."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    template.resource_count_is("AWS::Lambda::Url", 1)
+    template.has_resource_properties(
+        "AWS::Lambda::Url",
+        {
+            "AuthType": "NONE",
+            "InvokeMode": "RESPONSE_STREAM",
+            "Cors": Match.object_like(
+                {
+                    "AllowOrigins": ["http://localhost:8501"],
+                    "AllowHeaders": Match.array_with(["Authorization", "Content-Type"]),
+                }
+            ),
+        },
+    )
+
+
+def test_streaming_lambda_has_required_env(stacks):
+    """Phase 9a: streaming Lambda must carry KB_ID + MODEL_ARN + Cognito ids
+    so that it can both call Bedrock streaming AND verify the JWT in-handler.
+    """
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    # Find the Lambda whose env has USER_POOL_ID (only the streaming one does).
+    fns = template.find_resources("AWS::Lambda::Function")
+    matching = [
+        fn for fn in fns.values()
+        if "USER_POOL_ID" in fn.get("Properties", {})
+        .get("Environment", {})
+        .get("Variables", {})
+    ]
+    assert len(matching) == 1, "expected exactly one Lambda with USER_POOL_ID"
+    env_vars = matching[0]["Properties"]["Environment"]["Variables"]
+    for key in (
+        "KB_ID",
+        "MODEL_ARN",
+        "MODEL_ID",
+        "MEMORY_ID",
+        "CONVERSATIONS_TABLE",
+        "USER_POOL_ID",
+        "USER_POOL_CLIENT_ID",
+    ):
+        assert key in env_vars, f"streaming Lambda missing env var {key}"
 
 
 def test_lambda_env_has_agentcore_runtime_arn(stacks):
@@ -110,14 +160,20 @@ def test_lambda_env_has_agentcore_runtime_arn(stacks):
     )
 
 
-def test_lambda_env_does_not_contain_legacy_vars(stacks):
-    """Regression guard: KB_ID/MODEL_ARN/MODEL_ID belong to the agent, not the Lambda."""
+def test_buffered_lambda_env_does_not_contain_legacy_vars(stacks):
+    """Regression guard: KB_ID/MODEL_ARN/MODEL_ID belong to the agent + Phase 9a
+    streaming Lambda — NOT the Phase 8 buffered REST proxy. The buffered
+    handler is identified by carrying AGENTCORE_RUNTIME_ARN.
+    """
     _, _, _, api = stacks
     template = Template.from_stack(api)
     for fn in template.find_resources("AWS::Lambda::Function").values():
         env_vars = (
             fn.get("Properties", {}).get("Environment", {}).get("Variables", {})
         )
+        if "AGENTCORE_RUNTIME_ARN" not in env_vars:
+            # streaming Lambda (or any future Lambda) — skip
+            continue
         assert "KB_ID" not in env_vars
         assert "MODEL_ARN" not in env_vars
         assert "MODEL_ID" not in env_vars

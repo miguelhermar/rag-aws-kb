@@ -10,6 +10,11 @@ AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.append(str(AGENT_DIR))
 
+# Phase 9a — streaming Lambda lives in a separate asset dir.
+LAMBDA_STREAM_DIR = Path(__file__).resolve().parent.parent / "lambda_stream"
+if str(LAMBDA_STREAM_DIR) not in sys.path:
+    sys.path.append(str(LAMBDA_STREAM_DIR))
+
 os.environ.setdefault("AWS_REGION", "us-east-1")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
@@ -21,6 +26,9 @@ os.environ.setdefault(
 )
 os.environ.setdefault("MEMORY_ID", "rag_aws_memory-TESTID")
 os.environ.setdefault("CONVERSATIONS_TABLE", "test-conversations")
+# Phase 9a — streaming Lambda needs these for in-handler JWT verify.
+os.environ.setdefault("USER_POOL_ID", "us-east-1_TEST1234")
+os.environ.setdefault("USER_POOL_CLIENT_ID", "testclientid1234567890")
 # Kept for the sibling agent/ test suite (KB + model env), harmless for lambda tests.
 os.environ.setdefault("KB_ID", "TESTKBID00")
 os.environ.setdefault("MODEL_ARN", "us.anthropic.claude-haiku-4-5-20251001-v1:0")

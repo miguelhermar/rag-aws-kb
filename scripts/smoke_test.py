@@ -8,6 +8,8 @@ Exits 0 iff:
   3. POST /query (no Authorization header)        -> 401 or 403
   4. POST /query (empty question, valid token)    -> 400 error="InvalidRequest"
   5. GET  /conversations (valid Bearer token)     -> 200 + JSON array
+  6. POST /query-stream (Function URL, SSE)       -> 200 text/event-stream, accumulated
+                                                     answer parses as QueryResponse
 """
 from __future__ import annotations
 
@@ -166,6 +168,136 @@ def check_query_empty(runner: CheckRunner, base: str, token: str) -> None:
     )
 
 
+# Phase 9a — SSE smoke check
+def _iter_sse(resp):
+    event_name = "message"
+    data_lines: list[str] = []
+    for raw in resp.iter_lines(decode_unicode=True):
+        if raw is None:
+            continue
+        line = raw.rstrip("\r")
+        if line == "":
+            if data_lines:
+                blob = "\n".join(data_lines)
+                try:
+                    yield event_name, json.loads(blob)
+                except ValueError:
+                    yield event_name, {"raw": blob}
+            event_name = "message"
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[len("data:"):].lstrip())
+
+
+def check_query_stream(runner: CheckRunner, stream_url: str | None, token: str) -> None:
+    if not stream_url:
+        runner.record(
+            "POST /query-stream (SSE)",
+            False,
+            "no --stream-url and no StreamFunctionUrl in cdk-outputs.json",
+        )
+        return
+    url = stream_url.rstrip("/") + "/query-stream"
+    payload = {
+        "question": "What is the refund window for monthly plans?",
+        "session_id": "s-" + uuid.uuid4().hex,
+        "top_k": 3,
+    }
+    try:
+        r = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            json=payload,
+            timeout=60,
+            stream=True,
+        )
+    except requests.RequestException as e:
+        runner.record("POST /query-stream (SSE)", False, f"network error: {e}")
+        return
+    if r.status_code != 200:
+        runner.record(
+            "POST /query-stream (SSE) -> 200",
+            False,
+            f"status={r.status_code} body={r.text[:200]}",
+        )
+        return
+    ctype = r.headers.get("content-type", "")
+    if "text/event-stream" not in ctype:
+        runner.record(
+            "POST /query-stream (SSE) -> text/event-stream",
+            False,
+            f"content-type={ctype}",
+        )
+        return
+
+    accumulated = ""
+    sources: list = []
+    done_evt: dict | None = None
+    err_evt: dict | None = None
+    saw_meta = False
+    for event_name, data in _iter_sse(r):
+        if event_name == "meta":
+            saw_meta = True
+        elif event_name == "token":
+            accumulated += data.get("text", "")
+        elif event_name == "sources":
+            sources = data.get("sources") or []
+        elif event_name == "done":
+            done_evt = data
+            break
+        elif event_name == "error":
+            err_evt = data
+            break
+
+    if err_evt:
+        runner.record("POST /query-stream (SSE)", False, f"error event: {err_evt}")
+        return
+    if not (saw_meta and done_evt):
+        runner.record(
+            "POST /query-stream (SSE) framing",
+            False,
+            f"saw_meta={saw_meta} done={done_evt is not None}",
+        )
+        return
+
+    # Assemble a QueryResponse-shaped dict and pydantic-validate it (same
+    # consistency check as the non-streaming /query smoke).
+    assembled = {
+        "answer": accumulated.strip(),
+        "confidence": float(done_evt.get("confidence", 0.0)),
+        "sources": sources,
+        "metadata": {
+            "model": done_evt.get("model_id", ""),
+            "retrieval_strategy": "bedrock-kb-s3vectors-titan-v2-topk-stream",
+            "request_id": "smoke",
+            "latency_ms": int(done_evt.get("latency_ms", 0)),
+        },
+        "session_id": payload["session_id"],
+        "conversation_name": done_evt.get("conversation_name"),
+    }
+    try:
+        parsed = QueryResponse.model_validate(assembled)
+    except Exception as e:
+        runner.record(
+            "POST /query-stream (SSE) -> schema-valid", False, f"validation error: {e}"
+        )
+        return
+    runner.record(
+        "POST /query-stream (SSE) -> 200 + tokens + done",
+        len(parsed.sources) > 0 and 0.0 <= parsed.confidence <= 1.0,
+        f"sources={len(parsed.sources)} confidence={parsed.confidence:.3f}",
+    )
+
+
 def check_conversations_list(runner: CheckRunner, base: str, token: str) -> None:
     try:
         r = requests.get(
@@ -194,6 +326,7 @@ def main() -> int:
     outs = _api_outputs()
     p = argparse.ArgumentParser(description="Smoke-test the deployed RAG-AWS API (Cognito JWT).")
     p.add_argument("--api-url", default=outs.get("ApiUrl"))
+    p.add_argument("--stream-url", default=outs.get("StreamFunctionUrl"))
     p.add_argument("--user-pool-id", default=outs.get("UserPoolId"))
     p.add_argument("--client-id", default=outs.get("UserPoolClientId"))
     p.add_argument("--username", default=outs.get("TestUserName"))
@@ -221,12 +354,13 @@ def main() -> int:
     check_query_no_token(runner, base)
     check_query_empty(runner, base, token)
     check_conversations_list(runner, base, token)
+    check_query_stream(runner, args.stream_url, token)
 
     print()
     if runner.failures:
         print(f"SUMMARY: {len(runner.failures)} check(s) FAILED: {', '.join(runner.failures)}")
         return 1
-    print("SUMMARY: all 5 checks passed.")
+    print("SUMMARY: all 6 checks passed.")
     return 0
 
 
