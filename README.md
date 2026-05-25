@@ -513,14 +513,31 @@ python tests/eval/run_eval.py       # 8 questions, ~20s, writes tests/eval/eval_
 
 ```bash
 cp streamlit_client/.streamlit/secrets.toml.example streamlit_client/.streamlit/secrets.toml
-# Fill in:
-#   [api]    api_base_url  = jq -r '.ApiStack.ApiUrl'           cdk-outputs.json
-#   [stream] stream_url    = jq -r '.ApiStack.StreamFunctionUrl' cdk-outputs.json
-#   [auth.cognito]  ...    (from AuthStack outputs — see secrets.toml.example)
+# Fill in EVERY key in [auth] — st.login() validates strictly and aborts on any placeholder.
+#   [auth].redirect_uri        = http://localhost:8501/oauth2callback   (already correct)
+#   [auth].cookie_secret       = python -c "import secrets;print(secrets.token_hex(32))"
+#   [auth].client_id           = jq -r '.AuthStack.UserPoolClientId' cdk-outputs.json
+#   [auth].client_secret       = aws secretsmanager get-secret-value --secret-id "$(jq -r '.AuthStack.UserPoolClientSecretArn' cdk-outputs.json)" --query SecretString --output text
+#   [auth].server_metadata_url = jq -r '.AuthStack.OAuthDiscoveryUrl' cdk-outputs.json
+#   [api].api_base_url         = jq -r '.ApiStack.ApiUrl'              cdk-outputs.json
+#   [stream].stream_url        = jq -r '.ApiStack.StreamFunctionUrl'    cdk-outputs.json
 
 ./venv/bin/python -m streamlit run streamlit_client/app.py
 # → http://localhost:8501
 ```
+
+**Important**: Cognito App Client is provisioned with `http://localhost:8501/oauth2callback` as the **only** registered callback. Streamlit must bind to port 8501 — running on a different port breaks the OAuth round-trip.
+
+### 10.4.1 What a user sees (browser walkthrough)
+
+1. Open `http://localhost:8501` → Streamlit shows "Sign in with your Cognito account to continue" + a **Log in with Cognito** button.
+2. Click it → browser redirects to the Cognito Hosted UI at `https://ragkb-244564.auth.us-east-1.amazoncognito.com/login?...`. Sign in as `demo` with the password from Secrets Manager (the same one the smoke test uses).
+3. Cognito redirects back to `http://localhost:8501/oauth2callback`; Streamlit reads the ID token and persists it in `st.user.tokens["id"]`.
+4. **Chat**: type a question in the bottom chat input. With "Stream responses" toggle ON (default), the answer streams in token-by-token via SSE — first token typically in 1–2s after the LWA container warms up (the very first call may take 4–6s for cold start; subsequent calls are 1–1.5s).
+5. The Sources expander appears below each answer with up to `top_k` chunks (document, S3 URI, score, snippet).
+6. **Sidebar — past conversations**: click a conversation name to load that session's transcript. Names are LLM-generated on the first turn of each session.
+7. **Sidebar — upload**: pick a file (up to 50 MB, one of the 10 supported MIME types) and click "Ingest into knowledge base". A status panel streams the four steps (mint URL → S3 PUT → start ingestion → poll), reaching "Ingestion complete" in roughly 6–15s for a small document. Once complete, the new document is immediately queryable through both `/query` and `/query-stream`.
+8. **Sign out**: the sidebar **Log out** button clears the cookie + redirects to Cognito's logout URL.
 
 The UI supports: chat (with streaming toggle), past-session sidebar list, conversation replay on click, runtime document upload + ingest with status panel.
 

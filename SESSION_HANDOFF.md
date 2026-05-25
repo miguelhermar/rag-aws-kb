@@ -615,6 +615,18 @@ Documented prominently in [README.md §10.1](README.md) so a reviewer doing a fr
 
 No other live-deploy gotchas hit. The 4 Phase 8 gotchas in [[feedback-aws-phase8-gotchas]] (arm64-only Runtime, Cognito reserved prefix, DDB Decimal, custom-resource non-rotation) are already accounted for in the source.
 
+### 22.4a Caveats for a future Claude session
+
+Three things to know going into the next session that the current source + commits don't make obvious:
+
+1. **The test-user password sync ritual must run after every fresh `cdk deploy`** (or after any change to the secret-generator config). The AwsCustomResource doesn't re-fire on regenerated secret values — see [§7 #4 of README.md](README.md) for the one-liner. Smoke + eval fail with `NotAuthorizedException` on the very first call after deploy if you skip it.
+
+2. **LWA cold-start is real and only on the first streaming call**. The Python ASGI server inside the LWA container needs ~4–6s to import + bind on the first invocation after a deploy or after Lambda has scaled to zero. Subsequent calls land in 1–1.5s. If a reviewer hits the streaming endpoint cold and thinks something is broken, this is the cause — confirm with a second call. Pre-warming via a single `/health` (no auth) is NOT effective because /health is on a different Lambda (the buffered handler).
+
+3. **AgentCore Runtime is buffered-only and will likely stay that way for the near future.** Don't waste time looking for `InvokeAgentRuntime`-with-streaming; it doesn't exist as of May 2026. The Phase 9a streaming Lambda intentionally bypasses AgentCore Runtime and writes Memory + DDB itself after the stream — that duplication (Memory + DDB write logic in both `agent/rag.py` and `lambda_stream/stream_app.py`) is a deliberate consequence, not tech debt to consolidate. If/when AgentCore exposes streaming, the duplication can collapse.
+
+4. **The Streamlit `secrets.toml` must have EVERY `[auth]` key populated** for `st.login()` to start. Any field left as the placeholder string causes Streamlit to abort during initial import (not on first user click) with a non-obvious error. The README §10.4 lists the seven keys + their CDK-output sources; treat it as a checklist on every fresh setup.
+
 ### 22.5 What's new vs. the Phase 8 baseline
 
 | Aspect | Phase 8 state | Phase 9 state |
