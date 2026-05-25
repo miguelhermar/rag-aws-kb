@@ -1,0 +1,50 @@
+[
+  {
+    "id": "q01",
+    "question": "What is the refund window for monthly plans?",
+    "expected_doc": "refund-policy.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q02",
+    "question": "How long does standard domestic shipping take for Acme Notebook orders in the United States?",
+    "expected_doc": "shipping-policy.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q03",
+    "question": "What authentication requirements does Acme Notes enforce for employee accounts?",
+    "expected_doc": "security-policy.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q04",
+    "question": "How much paid time off do full-time Acme Notes employees accrue?",
+    "expected_doc": "employee-handbook.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q05",
+    "question": "What are the differences between the Free, Pro, Team, and Enterprise plans?",
+    "expected_doc": "product-faq.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q06",
+    "question": "What kinds of content are prohibited under the Acme Notes acceptable use policy?",
+    "expected_doc": "acceptable-use.md",
+    "category": "in-corpus"
+  },
+  {
+    "id": "q07",
+    "question": "What happens to my data if I cancel my account?",
+    "expected_doc": "security-policy.md",
+    "category": "ambiguous"
+  },
+  {
+    "id": "q08",
+    "question": "What is the office WiFi password?",
+    "expected_doc": null,
+    "category": "off-corpus"
+  }
+]

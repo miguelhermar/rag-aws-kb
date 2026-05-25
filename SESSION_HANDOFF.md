@@ -2,7 +2,9 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-24, after completing Phase 5 (operator scripts + ingestion live, end-to-end RAG verified, model re-locked to Claude Haiku 4.5). Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`; Phase 5 staged but uncommitted.
+**Last updated**: 2026-05-24 (evening), after completing Phase 6 (Streamlit client + smoke test + eval harness, all verified live against fresh redeploy). Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in the bundled commit referenced as the most recent on `main`.
+
+**Important**: between the last session and this one, Miguel ran `cdk destroy ApiStack StorageStack` to zero out idle AWS cost. Phase 6 began with a full redeploy of both stacks. All resource IDs in §8 are FRESH from the 2026-05-24-evening redeploy — the IDs in earlier session-handoff revisions are stale and should be ignored.
 
 ---
 
@@ -58,8 +60,8 @@ The user (Miguel) is productionizing a Streamlit + Gemini + FAISS RAG prototype 
 | 3 | Lambda handler + container image | ✅ Complete (local — pytest + docker build green) |
 | 4 | CDK ApiStack (Lambda + APIGW + auth) | ✅ Complete + **deployed and smoke-tested live** |
 | 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) + end-to-end RAG | ✅ Complete + **6 docs ingested, in-corpus & off-corpus smoke tests green live** |
-| 6 | Streamlit client + smoke test + eval harness | ⏭️ NEXT |
-| 7 | Final README + cleanup + hardening notes | Pending all prior |
+| 6 | Streamlit client + smoke test + eval harness | ✅ Complete + **smoke 4/4 green live, eval 100% in-corpus source-match, Streamlit boots clean** |
+| 7 | Final README + cleanup + hardening notes | ⏭️ NEXT (docs-only) |
 
 See full phase briefs (goals, files, DoD, prereqs) in [PLAN.md §"Implementation phases"](PLAN.md).
 
@@ -116,48 +118,48 @@ This fix is NOT yet committed. The repo working tree has the fix; if no commit h
 
 ---
 
-## 8. Live AWS state (as of 2026-05-24, end of Phase 5)
+## 8. Live AWS state (as of 2026-05-24 evening, end of Phase 6)
 
 **Account**: `954863244564`, IAM user `admin_user`, region `us-east-1`.
 
-**StorageStack — deployed, `CREATE_COMPLETE`.** (Re-deployed between sessions; original 2026-05-23 IDs are superseded by the values below as of 2026-05-24.)
+**StorageStack — deployed, `CREATE_COMPLETE`, 14 resources, ~62s wall-clock.**
 
-**ApiStack — deployed, 21 resources `CREATE_COMPLETE`, ~197s wall-clock (incl. docker build + ECR push).**
+**ApiStack — deployed, 22 resources `CREATE_COMPLETE`, ~70s wall-clock (docker layer cache warm).**
 
-Outputs written to [cdk-outputs.json](cdk-outputs.json) (now gitignored as of `.gitignore` update in commit `e3925e5`):
+Outputs written to [cdk-outputs.json](cdk-outputs.json) (gitignored). DO NOT memorize specific IDs — they rotate on every redeploy. Read from `cdk-outputs.json` via `jq` and from Secrets Manager for the API key. The current values as of this writing:
 ```
 # StorageStack
-KbId            = W6ZGK8YJWU
-KbArn           = arn:aws:bedrock:us-east-1:954863244564:knowledge-base/W6ZGK8YJWU
-DataSourceId    = 91I2LVEI5L
-DocsBucketName  = storagestack-docsbucketecea003f-jhol3lw1fmxx
-DocsBucketArn   = arn:aws:s3:::storagestack-docsbucketecea003f-jhol3lw1fmxx
+KbId            = LA8DA5P7HH
+KbArn           = arn:aws:bedrock:us-east-1:954863244564:knowledge-base/LA8DA5P7HH
+DataSourceId    = UNMM05LJHV
+DocsBucketName  = storagestack-docsbucketecea003f-u6kkxkfltmgj
+DocsBucketArn   = arn:aws:s3:::storagestack-docsbucketecea003f-u6kkxkfltmgj
 VectorBucketArn = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564
 VectorIndexArn  = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564/index/rag-aws-kb-index
-ApiKeySecretArn = arn:aws:secretsmanager:us-east-1:954863244564:secret:ApiKeySecretF1B08E61-0oa0AJwle1oP-9HvoqZ
+ApiKeySecretArn = arn:aws:secretsmanager:us-east-1:954863244564:secret:ApiKeySecretF1B08E61-0nj3ocgfH4cZ-iifl5w
 
 # ApiStack
-ApiUrl              = https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/
-LambdaFunctionName  = ApiStack-RagHandler014AF978-QJdp1JKQFOE2
+ApiUrl              = https://id04zftvx5.execute-api.us-east-1.amazonaws.com/prod/
+LambdaFunctionName  = ApiStack-RagHandler014AF978-2DxedjA9s4yl
 LogGroupName        = /aws/lambda/ApiStack-RagHandler
 ```
 
-**Live status verified via CLI + curl smoke tests (2026-05-24, end of Phase 5)**:
-- KB `W6ZGK8YJWU` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
-- DataSource `91I2LVEI5L` → status `AVAILABLE`, chunking `FIXED_SIZE`; **6/6 sample-docs ingested** (Phase 5) ✅
-- Docs bucket → 6 `.md` files from `sample-docs/` uploaded idempotently via `scripts/upload_docs.py` ✅
+**Live status verified via CLI + curl + scripts/smoke_test.py + tests/eval/run_eval.py (2026-05-24 evening, end of Phase 6)**:
+- KB `LA8DA5P7HH` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
+- DataSource `UNMM05LJHV` → status `AVAILABLE`, chunking `FIXED_SIZE`; **6/6 sample-docs ingested** ✅
+- Docs bucket → 6 `.md` files uploaded via `scripts/upload_docs.py` (idempotent) ✅
 - Vector index `rag-aws-kb-index` → dim=1024, metric=cosine, dtype=float32 ✅
-- API key secret → exists; value is `{"apiKey": "<32 alnum chars>"}` (never printed) ✅
-- **API Gateway**: `curl https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/health` → `200 {"status":"ok"}` ✅
-- **API Gateway auth**: `POST /query` without `x-api-key` → `403 Forbidden` ✅
-- **End-to-end /query (in-corpus, "refund window")**: `200` with grounded answer + `[1]` citations, top sources `refund-policy.md` (scores ~0.61), confidence ~0.67 ✅
-- **End-to-end /query (off-corpus, "incident reporting")**: `200` with canned `"I don't have information about that in the knowledge base."`, confidence clamped to 0.2 ✅
+- API key secret → exists; value `{"apiKey": "<32 alnum chars>"}` (never printed) ✅
+- **`scripts/smoke_test.py` → 4/4 PASS**: `/health` 200, `/query` valid+key 200 schema-valid + sources non-empty, `/query` no-key 403, `/query` empty-question 400 `InvalidRequest` ✅
+- **`tests/eval/run_eval.py` → committed [tests/eval/eval_results.md](tests/eval/eval_results.md)**: source-match 100% (6/6 in-corpus), mean in-corpus confidence 0.813, off-corpus confidence clamped to 0.200, total wall-clock 20.2s for 8 questions ✅
+- **`cdk diff` on both stacks**: 0 differences (zero IaC drift — Phase 6 touched only client/test/eval code) ✅
 
 **User pre-flight done before deploy**:
-- Enabled Bedrock model access for Titan v2 in us-east-1 console (Claude 3 Haiku access was enabled initially but the model became LEGACY post-2026 and gated behind AWS Marketplace; we re-locked to Claude Haiku 4.5 via inference profile — see §3 and §14). The inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` is `ACTIVE` and does not require Marketplace subscription.
-- Ran `cdk bootstrap aws://954863244564/us-east-1` (CDKToolkit stack exists)
+- Bedrock model access for Titan v2 (`amazon.titan-embed-text-v2:0`) is `ACTIVE` in us-east-1.
+- Haiku 4.5 inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` is `ACTIVE` and does not require Marketplace subscription.
+- `cdk bootstrap aws://954863244564/us-east-1` (CDKToolkit stack exists, unchanged across redeploys).
 
-**Cost incurred so far**: <$0.10 total (docker build + ECR push + smoke test invocations). Idle cost going forward ≈$0.40/month (Secrets Manager flat fee + ECR storage of the Lambda image, ~50 MB, negligible). Active cost: ~$0.0003 per `/query` (Haiku tokens dominate; APIGW + Lambda compute are rounding error).
+**Cost incurred so far this session (Phase 6)**: ~$0.10 (full redeploy: docker push to ECR + ingestion + smoke runs + 8-question eval). Idle cost going forward ≈$0.40/month (Secrets Manager flat fee + ECR storage). Active cost: ~$0.0003 per `/query` (Haiku tokens dominate; APIGW + Lambda compute are rounding error). Cumulative project total still well under $1 of the $20 budget.
 
 ---
 
@@ -177,9 +179,9 @@ aws sts get-caller-identity   # should show account 954863244564
 aws cloudformation describe-stacks --stack-name StorageStack --region us-east-1 \
   --query 'Stacks[0].StackStatus' --output text   # → CREATE_COMPLETE or UPDATE_COMPLETE
 
-aws bedrock-agent get-knowledge-base --knowledge-base-id W6ZGK8YJWU \
+KB_ID=$(jq -r '.StorageStack.KbId' cdk-outputs.json)
+aws bedrock-agent get-knowledge-base --knowledge-base-id "$KB_ID" \
   --region us-east-1 --query 'knowledgeBase.status' --output text   # → ACTIVE
-# (Or read the current id from cdk-outputs.json: jq -r '.StorageStack.KbId' cdk-outputs.json)
 
 # Re-synth (no AWS calls)
 cd infra && cdk synth
@@ -310,85 +312,83 @@ Two issues surfaced during Phase 5 that required corrective action. Both are now
 
 ---
 
-## 15. Next phase brief (Phase 6 — Streamlit client + eval harness)
+## 15. Phase 6 — what we did
 
-**Goal**: Local Streamlit UI talks to the deployed API; smoke test exits 0; eval harness runs ≥8 questions and writes a committed results table.
+Done by sub-agent (`general-purpose` type) on 2026-05-24 evening after Miguel and the orchestrator did the full StorageStack + ApiStack redeploy + doc upload + ingestion together. Trust-but-verified by Claude orchestrator (read all 5 new files, independently re-ran `scripts/smoke_test.py` against live API, inspected committed [tests/eval/eval_results.md](tests/eval/eval_results.md), confirmed `cdk diff` shows 0 differences on both stacks → no IaC drift).
 
-**Files to create**:
-- [streamlit_client/app.py](streamlit_client/app.py) — slim chat UI. Reads `API_BASE_URL` + `API_KEY` from `st.secrets` ([secrets.toml](streamlit_client/.streamlit/secrets.toml.example) template already committed). Renders: question input → answer (markdown) → confidence badge (green ≥0.7 / yellow 0.4–0.7 / red <0.4) → expandable sources showing snippet + `s3_uri` + score. **No FAISS, no Gemini, no document upload UI** — pure HTTPS client.
-- [streamlit_client/requirements.txt](streamlit_client/requirements.txt) — `streamlit`, `requests` only.
-- [scripts/smoke_test.py](scripts/smoke_test.py) — exit 0 iff: `/health` 200; `/query` with valid key + valid body 200 with non-empty sources; `/query` with no key 403; `/query` with empty question 400. CLI args same defaults pattern as the other scripts.
-- [tests/eval/questions.json](tests/eval/questions.json) — ≥8 questions. Must include: 1 off-corpus question (expects INSUFFICIENT_ANSWER + confidence ≤0.2), 1 ambiguous question (e.g., spans multiple docs), and at least one question per sample doc topic (refund, shipping, security, employee, FAQ, acceptable-use).
-- [tests/eval/run_eval.py](tests/eval/run_eval.py) — POSTs each question to the deployed API, writes a Markdown table to [tests/eval/eval_results.md](tests/eval/eval_results.md) with columns: question, expected_doc, actual_top_source, score, confidence, answer (truncated), latency_ms. Compute aggregate metrics: source-match rate, mean confidence on in-corpus, mean confidence on off-corpus.
-- [tests/eval/eval_results.md](tests/eval/eval_results.md) — committed sample run from a single execution.
+**Files created**:
+- [streamlit_client/app.py](streamlit_client/app.py) — 112 lines. `st.chat_input` + `st.chat_message` chat UI. Sidebar with `top_k` slider (default 5) + Clear-conversation button. Reads `API_BASE_URL` + `API_KEY` from `st.secrets` (fails loudly with `st.stop()` if missing). Confidence badge via `st.success`/`st.warning`/`st.error` thresholds (≥0.7 / ≥0.4 / <0.4). Expandable Sources section with `document`, `s3_uri`, score-to-3-decimals, snippet. Handles non-200 + network errors via `st.error`. Replays session history.
+- [streamlit_client/requirements.txt](streamlit_client/requirements.txt) — `streamlit==1.57.0`, `requests==2.34.2` (pinned to latest stable verified on PyPI day-of).
+- [scripts/smoke_test.py](scripts/smoke_test.py) — 189 lines. 4 checks: `/health` 200+body match, `/query` valid+key 200 + pydantic-validates `QueryResponse` from `lambda/schemas.py` + non-empty sources + confidence in [0,1], `/query` no-key 403, `/query` empty-question 400 with `error == "InvalidRequest"`. Reads defaults from `cdk-outputs.json` via argparse (same pattern as `scripts/upload_docs.py`). Never prints the API key.
+- [tests/eval/questions.json](tests/eval/questions.json) — 8 items, one per category required by the brief: 6 in-corpus (one per sample doc topic), 1 ambiguous ("What happens to my data if I cancel my account?"), 1 off-corpus ("What is the office WiFi password?").
+- [tests/eval/run_eval.py](tests/eval/run_eval.py) — 172 lines. POSTs each question with `top_k=5`, paces 250ms between calls (UsagePlan rate is 5/s), writes [tests/eval/eval_results.md](tests/eval/eval_results.md) with full per-question table + aggregate metrics block (source-match rate excluding ambiguous + off-corpus, mean confidence per category, total wall-clock and API latency).
+- [tests/eval/eval_results.md](tests/eval/eval_results.md) — committed sample run from one execution against the live API.
 
-**Verification before declaring Phase 6 done**:
-1. `streamlit run streamlit_client/app.py` → ask "What is the refund window?", verify grounded answer + refund-policy.md in sources + green confidence badge.
-2. `python scripts/smoke_test.py` → exits 0.
-3. `python tests/eval/run_eval.py` → writes [tests/eval/eval_results.md](tests/eval/eval_results.md); source-match rate ≥ 80% on in-corpus questions; off-corpus question shows INSUFFICIENT_ANSWER + confidence ≤ 0.2.
+**Live verification (2026-05-24 evening)**:
+- `scripts/smoke_test.py` → 4/4 PASS (re-run independently by orchestrator after agent's run).
+- `tests/eval/run_eval.py` → source-match 100% (6/6 in-corpus), mean in-corpus confidence **0.813**, off-corpus question clamped to **0.200** (canned INSUFFICIENT_ANSWER), 20.2s wall-clock for 8 questions.
+- `cdk diff` on both stacks → **0 differences** (agent did NOT touch infra; rule from [[feedback-no-out-of-band-aws-changes]] held).
+- Streamlit headless boot → HTTP 200 from `localhost:8501`, clean uvicorn startup (no traceback). Visual UI rendering was eyeballed by Miguel.
 
-**Cost note**: ~10–20 Claude Haiku 4.5 calls during eval = ~$0.05 active. Streamlit local-only = $0.
+**Sub-agent deviations from brief** (all accepted):
+1. **Q07 (ambiguous question) returned INSUFFICIENT_ANSWER + 0.200 confidence** rather than a multi-source synthesis. The model retrieved chunks (top hit `acceptable-use.md`, score 0.577) but judged the context insufficient. This is defensible grounded-RAG behavior on a genuinely ambiguous question; the eval file documents it transparently. Phase 7 hardening-notes mention this is a candidate for prompt-tuning if a future product owner wants the system to attempt multi-doc synthesis on ambiguous questions.
+2. **Streamlit was launched via `./venv/bin/python -m streamlit`** rather than the `streamlit` script entrypoint, because the repo-root `venv/` has stale `#!` shebangs from when the directory was named `RAG-demo/`. No changes were made to the venv. Phase 7 cleanup candidate (or just delete the legacy venv and rebuild — `infra/.venv/` is the only one CDK touches).
 
-**How to execute**: same pattern — one `general-purpose` sub-agent with a tight brief, then trust-but-verify (read key files, run smoke + eval against the live API, inspect the Streamlit UI in a browser).
+**Empty-question validator note**: [lambda/schemas.py:8](lambda/schemas.py#L8) already had `Field(min_length=1)` on `question` (added in Phase 5), and [tests/test_schemas.py:33-35](tests/test_schemas.py#L33-L35) already covered the rejection case. The brief asked for these to be added in Phase 6; turned out they were already present, so no schema/Lambda change was needed and no redeploy was triggered for this reason. (StorageStack + ApiStack were redeployed anyway because Miguel destroyed them between sessions.)
 
-**Files to create**:
-- `lambda/Dockerfile` — base `public.ecr.aws/lambda/python:3.12`
-- `lambda/requirements.txt` — `boto3>=1.35`, `pydantic>=2`, `structlog`
-- `lambda/app.py` — handler with internal routing on `event["resource"]`: `GET /health` (no AWS call), `POST /query` (full RAG)
-- `lambda/rag.py` — Retrieve → prompt build → InvokeModel → confidence calc → response
-- `lambda/schemas.py` — pydantic v2 request/response/error models
-- `tests/test_schemas.py` — pytest round-trip tests
-
-**Response schema** (must match brief §6 exactly):
-```json
-{
-  "answer": "...",
-  "confidence": 0.84,
-  "sources": [
-    {"s3_uri": "s3://.../refund-policy.md", "document": "refund-policy.md",
-     "score": 0.91, "snippet": "..."}
-  ],
-  "metadata": {
-    "model": "anthropic.claude-3-haiku-20240307-v1:0",
-    "retrieval_strategy": "bedrock-kb-s3vectors-titan-v2-topk",
-    "request_id": "uuid4",
-    "latency_ms": 1240
-  }
-}
-```
-
-**Error envelope**: `{"error": "InvalidRequest|Unauthorized|Internal", "message": "...", "request_id": "..."}` — 400 / 500 (403 handled by API GW).
-
-**Confidence formula** (port simplified from [legacy/rag/generator.py:217-264](legacy/rag/generator.py#L217-L264)):
-```
-confidence = clamp(0.6*max(scores) + 0.3*mean(scores) + 0.1*(1 - stdev(scores)), 0, 1)
-```
-If Claude returns `INSUFFICIENT_CONTEXT`, override answer to "I don't have information about that in the knowledge base" and clamp confidence to ≤0.2.
-
-**Prompt template**: port the grounded prompt shape from [legacy/rag/generator.py:28-74](legacy/rag/generator.py#L28-L74). Strip "explain like 10" and related-questions branches. System: "Answer ONLY from provided context. If insufficient, reply exactly `INSUFFICIENT_CONTEXT`. Cite sources as [n]." User: numbered chunks + the question.
-
-**Boto3 client init**: module-scope (so warm Lambda invocations skip ~2s cold start). Two clients: `bedrock-agent-runtime` (for Retrieve) and `bedrock-runtime` (for InvokeModel).
-
-**Verification before declaring Phase 3 done**:
-1. `docker build` succeeds (`lambda/Dockerfile`)
-2. `pytest tests/test_schemas.py` green
-3. Local invoke with mocked event returns schema-valid JSON (mock Bedrock or run against real KB with creds — Lambda hasn't been deployed yet, so this is local-only)
-4. Code reviewed for hard-coded secrets (none) and IAM expectations (handler assumes the role has `bedrock:Retrieve` + `bedrock:InvokeModel` — to be granted by ApiStack)
-
-**How the user wants Phase 3 executed**: same pattern as Phase 2 — spawn one `general-purpose` sub-agent with a tight brief, then trust-but-verify by reading key files and running tests yourself.
+**Cost incurred this phase**: ~$0.10 total (full redeploy = docker push to ECR + ingestion run + ~12 Haiku 4.5 calls across smoke + eval). Cumulative project total still well under $1 of the $20 budget.
 
 ---
 
-## 12. Things to remember about this user
+## 16. Next phase brief (Phase 7 — Final README + cleanup + hardening notes)
+
+**Goal**: Reviewer can stand up + tear down the entire system in <30 minutes using only the README. The README satisfies brief [§14.3](AWS%20Native%20Knowledge%20Base%20Agent%20Candidate%20Project%20Brief.md) ("Documentation Requirements").
+
+**Files**:
+- [README.md](README.md) — full rewrite (currently a stub from Phase 1).
+- *Possibly* an `architecture.png` or `architecture.svg` (a simple service-flow diagram). If we don't want to bother with image generation, an ASCII diagram in the README is acceptable.
+- No code changes intended. If we choose to clean up the `RAG-demo/`-era shebangs in `venv/`, that's a one-line `rm -rf venv && python3 -m venv venv && venv/bin/pip install -r tests/requirements.txt` — but it's optional and worth a brief conversation first.
+
+**README sections required by brief §14.3 + our internal lessons**:
+1. **Overview** — one-paragraph what this is + the live status (resource IDs come from `cdk-outputs.json`, not hardcoded).
+2. **Architecture diagram** — services + data flow. AWS-only path: Client (Streamlit) → APIGW (API key) → Lambda (container) → Bedrock Retrieve (KB on S3 Vectors) → Bedrock InvokeModel (Haiku 4.5 inference profile) → response with grounded citations + confidence.
+3. **Services used** — APIGW REST, Lambda container, S3 (docs), S3 Vectors (index), Bedrock KB, Bedrock Runtime, Titan v2 embeddings, Secrets Manager, CloudWatch Logs, IAM. One line per service.
+4. **API contract** — request/response/error schemas (copy from [lambda/schemas.py](lambda/schemas.py) and [PLAN.md §"Schemas"](PLAN.md)) + auth header (`x-api-key`).
+5. **RAG behavior** — chunking (FIXED_SIZE 300/20%), retrieval (top-k cosine over Titan v2), prompt (grounded with `INSUFFICIENT_CONTEXT` literal), confidence formula, INSUFFICIENT_ANSWER override.
+6. **Sample docs** — list the 6 fictional Acme Notes docs + the seed prompt that generated them.
+7. **How to deploy** — `cdk bootstrap` → `cdk deploy StorageStack ApiStack` → `python scripts/upload_docs.py` → `python scripts/start_ingestion.py` → copy `streamlit_client/.streamlit/secrets.toml.example` → `streamlit run streamlit_client/app.py`. Each step with one-line "why" and an indicative wall-clock.
+8. **How to verify** — `python scripts/smoke_test.py` (must exit 0) + `python tests/eval/run_eval.py` (writes a fresh `eval_results.md`).
+9. **How to tear down** — `cdk destroy ApiStack StorageStack --force`. Note that `autoDeleteObjects=True` empties the docs bucket and that `AwsCustomResource.onDelete` handles the vector index. Mention that ECR image (Lambda asset) stays until the asset cleanup lambda runs — manual `aws ecr delete-repository` may be required for full cost zero.
+10. **Changes from sample / what we replaced** — link `legacy/` and explain that FAISS → S3 Vectors, Gemini → Bedrock Claude Haiku 4.5, in-process loaders → KB ingestion, in-process retrieval → KB Retrieve, no FastAPI (handler is Lambda native).
+11. **AI tools used in build** — Claude Code orchestration + sub-agents, with the phased approach + trust-but-verify gate at each phase.
+12. **Assumptions made** — `us-east-1`-only, account `954863244564`, model access pre-enabled, ~$1 active spend cap, manual ingestion (no event-driven), API-key auth (not Cognito).
+13. **Data flow security note** — explain explicitly that requests/responses never leave AWS (no third-party APIs in the runtime path), the API key is the only outbound secret (delivered to the local Streamlit client via `secrets.toml`), and CloudWatch Logs are the only place a question is persisted server-side.
+14. **Hardening notes — what we'd do for production** — copy [PLAN.md §"Production hardening"](PLAN.md): VPC + interface endpoints, WAF, KMS CMKs, X-Ray tracing, CloudWatch budget alarms at $10/$18, per-identity rate limiting via Cognito JWT, output PII redaction, Bedrock model fallback (Haiku → Sonnet), async ingestion pipeline (S3 → EventBridge → Step Function), SnapStart when GA for container Lambdas. Add the Phase 5 lesson (model deprecation guardrails) and the Phase 6 lesson (prompt-tune for ambiguous questions if multi-doc synthesis is desired).
+15. **Leaked-secret note** — the legacy `.env` at repo root still contains a Gemini key from the original prototype (gitignored, never pushed, but lives on Miguel's disk). New stack does not use Gemini; the key should be rotated/deleted by Miguel.
+
+**Verification before declaring Phase 7 done**:
+1. A fresh reader of just the README can run through the 6 steps and end up with a working system. Test this by following our own README from a clean shell.
+2. All file references in the README resolve (no broken markdown links).
+3. `git status` clean; nothing uncommitted.
+4. Final `git log` shows a sensible phase-based commit history.
+
+**Cost note**: docs-only phase = $0 active cost. (No new AWS deploys planned; if `cdk destroy` is run after the README is verified, idle cost drops to $0 once the ECR repo is removed.)
+
+**How to execute**: probably inline by the orchestrator rather than a sub-agent — it's a docs-only phase and the synthesis benefits from full session context. If Miguel prefers a sub-agent (e.g., to draft a first cut while the orchestrator does something else), use that pattern; the existing handoff doc gives the sub-agent enough context to write a strong README.
+
+---
+
+## 17. Things to remember about this user
 
 - They asked to "leverage the compact skill" but there is no literal `/compact` skill — interpret as "write a dense session handoff".
 - They prefer terse, opinionated responses over menus.
 - They have given standing authorization to deploy to their AWS account `954863244564/us-east-1`. Always confirm before destructive operations (`cdk destroy`, `aws s3 rb`).
 - They appreciate cost transparency — quote idle/active costs when proposing AWS actions.
 - They're using VS Code; file references should be markdown links `[name.ext](relative/path)`.
+- They sometimes `cdk destroy` between sessions to zero out idle cost — at session start, always run `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` (or just `jq` on `cdk-outputs.json` + a `describe-stacks` call) to confirm whether StorageStack/ApiStack are still up before assuming any live IDs are valid.
 
 ---
 
-## 16. Closing pointer
+## 18. Closing pointer
 
-If you start a new session: read this file, then [PLAN.md](PLAN.md), then ask the user: **"Ready to start Phase 6 (Streamlit client + smoke test + eval harness)? The API is live and the KB is ingested — Phase 6 is what turns the deployed system into something a reviewer can actually click through."** Do not re-derive decisions from scratch; the decisions in §3 are final unless the user explicitly reopens them.
+If you start a new session: read this file end-to-end, then [PLAN.md](PLAN.md). Then check whether the stacks are deployed (see §17 last bullet). Then ask Miguel: **"Ready to start Phase 7 (final README + cleanup + hardening notes)? The system is fully deployed and verified end-to-end — Phase 7 is the docs-only wrap that makes the project reviewable in <30 minutes."** Do not re-derive decisions from scratch; the decisions in §3 are final unless Miguel explicitly reopens them.
