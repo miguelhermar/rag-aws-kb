@@ -302,6 +302,138 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    # -----------------------------------------------------------------------
+    # Phase 9b — upload + ingestion
+    # -----------------------------------------------------------------------
+    st.divider()
+    st.subheader("Upload document")
+    st.caption(
+        "Upload a single file (max 50 MB). It will be ingested into the "
+        "knowledge base, then queryable through chat."
+    )
+    # Whitelist mirrors lambda/uploads.py ALLOWED_EXTENSIONS.
+    _ALLOWED_EXTS = ["txt", "md", "html", "htm", "pdf", "doc", "docx", "csv", "xls", "xlsx"]
+    _EXT_TO_MIME = {
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "html": "text/html",
+        "htm": "text/html",
+        "pdf": "application/pdf",
+        "doc": "application/msword",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "csv": "text/csv",
+        "xls": "application/vnd.ms-excel",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    uploaded = st.file_uploader(
+        "Choose a file",
+        type=_ALLOWED_EXTS,
+        accept_multiple_files=False,
+        key="upload_widget",
+    )
+    if uploaded is not None and st.button("Ingest into knowledge base", key="ingest_btn"):
+        size_mb = len(uploaded.getvalue()) / (1024 * 1024)
+        if size_mb > 50:
+            st.error(f"File too large ({size_mb:.1f} MB). Limit is 50 MB.")
+        else:
+            ext = uploaded.name.rsplit(".", 1)[-1].lower()
+            content_type = _EXT_TO_MIME.get(ext, "application/octet-stream")
+            with st.status("Uploading and ingesting…", expanded=True) as status:
+                try:
+                    # 1. Mint URL.
+                    status.write("Minting upload URL…")
+                    r = requests.post(
+                        f"{API_BASE_URL}/documents",
+                        headers=_auth_headers(),
+                        json={"filename": uploaded.name, "content_type": content_type},
+                        timeout=REQUEST_TIMEOUT_S,
+                    )
+                    if r.status_code in (401, 403):
+                        _handle_unauthorized()
+                    r.raise_for_status()
+                    mint = r.json()
+
+                    # 2. PUT to S3 with the matching Content-Type.
+                    status.write(f"Uploading {size_mb:.2f} MB to S3…")
+                    put = requests.put(
+                        mint["upload_url"],
+                        data=uploaded.getvalue(),
+                        headers={"Content-Type": content_type},
+                        timeout=120,
+                    )
+                    put.raise_for_status()
+
+                    # 3. Start ingestion.
+                    status.write("Starting ingestion job…")
+                    r = requests.post(
+                        f"{API_BASE_URL}/ingest",
+                        headers=_auth_headers(),
+                        json={"key": mint["key"]},
+                        timeout=REQUEST_TIMEOUT_S,
+                    )
+                    if r.status_code in (401, 403):
+                        _handle_unauthorized()
+                    r.raise_for_status()
+                    job_id = r.json()["job_id"]
+                    status.write(f"Job started: `{job_id}`")
+
+                    # 4. Poll every 2s up to 90s.
+                    deadline = time.monotonic() + 90.0
+                    last_status = "STARTING"
+                    last_body: dict = {}
+                    while time.monotonic() < deadline:
+                        time.sleep(2.0)
+                        r = requests.get(
+                            f"{API_BASE_URL}/ingest/{job_id}",
+                            headers=_auth_headers(),
+                            timeout=REQUEST_TIMEOUT_S,
+                        )
+                        if r.status_code in (401, 403):
+                            _handle_unauthorized()
+                        if r.status_code != 200:
+                            status.update(label="Polling failed", state="error")
+                            st.error(f"GET /ingest/{job_id} -> {r.status_code}")
+                            break
+                        last_body = r.json()
+                        last_status = last_body.get("status", "UNKNOWN")
+                        status.write(f"Status: `{last_status}`")
+                        if last_status in ("COMPLETE", "FAILED", "STOPPED"):
+                            break
+
+                    if last_status == "COMPLETE":
+                        stats = last_body.get("statistics", {})
+                        status.update(label="Ingestion complete", state="complete")
+                        st.success(
+                            f"Indexed {stats.get('indexed', 0)} / "
+                            f"{stats.get('scanned', 0)} document(s); "
+                            f"failed {stats.get('failed', 0)}."
+                        )
+                        # Refresh conversations (harmless side-effect; the new
+                        # doc is immediately queryable via /query and /query-stream).
+                        st.session_state.conversations = _list_conversations()
+                    elif last_status in ("FAILED", "STOPPED"):
+                        status.update(label=f"Ingestion {last_status}", state="error")
+                        reasons = last_body.get("failure_reasons") or []
+                        st.error(
+                            f"Ingestion {last_status}. "
+                            + ("Reasons: " + "; ".join(reasons) if reasons else "")
+                        )
+                    else:
+                        status.update(label="Timed out", state="error")
+                        st.warning(
+                            f"Did not reach COMPLETE within 90s. Last status: {last_status}."
+                            f" Job id: {job_id}."
+                        )
+                except requests.HTTPError as e:
+                    status.update(label="Failed", state="error")
+                    body_text = ""
+                    if e.response is not None:
+                        body_text = e.response.text[:300]
+                    st.error(f"HTTP error: {e} {body_text}")
+                except requests.RequestException as e:
+                    status.update(label="Network error", state="error")
+                    st.error(f"Network error: {e}")
+
     st.divider()
     st.subheader("Past conversations")
     for conv in st.session_state.conversations:

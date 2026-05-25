@@ -10,12 +10,15 @@ Exits 0 iff:
   5. GET  /conversations (valid Bearer token)     -> 200 + JSON array
   6. POST /query-stream (Function URL, SSE)       -> 200 text/event-stream, accumulated
                                                      answer parses as QueryResponse
+  7. Upload + ingestion flow (90s)                 -> mint URL, PUT bytes, start ingestion,
+                                                     poll to COMPLETE, then /query verifies retrieval
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -298,6 +301,132 @@ def check_query_stream(runner: CheckRunner, stream_url: str | None, token: str) 
     )
 
 
+# Phase 9b — upload + ingestion smoke
+def check_upload_ingest_flow(runner: CheckRunner, base: str, token: str) -> None:
+    name = "Upload + ingestion flow (90s)"
+    marker = f"goblin-token-{uuid.uuid4().hex[:8]}"
+    body = (
+        f"# Phase 9b smoke marker\n\n"
+        f"The secret refund window phrase is: {marker}.\n"
+        f"This file was uploaded by the smoke test to verify ingestion.\n"
+    ).encode("utf-8")
+    filename = f"smoke-{uuid.uuid4().hex[:8]}.md"
+    content_type = "text/markdown"
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    # 1) Mint presigned URL.
+    try:
+        r = requests.post(
+            f"{base}/documents",
+            headers=headers,
+            json={"filename": filename, "content_type": content_type},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        runner.record(name, False, f"network error on POST /documents: {e}")
+        return
+    if r.status_code != 200:
+        runner.record(name, False, f"POST /documents -> {r.status_code} {r.text[:160]}")
+        return
+    mint = r.json()
+    upload_url = mint["upload_url"]
+    key = mint["key"]
+
+    # 2) PUT bytes directly to S3 with the SAME Content-Type signed.
+    try:
+        put = requests.put(
+            upload_url,
+            data=body,
+            headers={"Content-Type": content_type},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        runner.record(name, False, f"network error on S3 PUT: {e}")
+        return
+    if put.status_code not in (200, 204):
+        runner.record(name, False, f"S3 PUT -> {put.status_code} {put.text[:160]}")
+        return
+
+    # 3) Start ingestion.
+    try:
+        r = requests.post(
+            f"{base}/ingest",
+            headers=headers,
+            json={"key": key},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        runner.record(name, False, f"network error on POST /ingest: {e}")
+        return
+    if r.status_code != 200:
+        runner.record(name, False, f"POST /ingest -> {r.status_code} {r.text[:160]}")
+        return
+    job_id = r.json().get("job_id")
+    if not job_id:
+        runner.record(name, False, "POST /ingest returned no job_id")
+        return
+
+    # 4) Poll every 2s up to 90s.
+    deadline = time.monotonic() + 90.0
+    final_status = None
+    final_body: dict = {}
+    while time.monotonic() < deadline:
+        try:
+            r = requests.get(
+                f"{base}/ingest/{job_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            runner.record(name, False, f"network error on GET /ingest/{job_id}: {e}")
+            return
+        if r.status_code != 200:
+            runner.record(name, False, f"GET /ingest/{job_id} -> {r.status_code}")
+            return
+        final_body = r.json()
+        final_status = final_body.get("status")
+        if final_status in ("COMPLETE", "FAILED", "STOPPED"):
+            break
+        time.sleep(2.0)
+
+    if final_status != "COMPLETE":
+        runner.record(
+            name,
+            False,
+            f"ingestion did not reach COMPLETE; last status={final_status} body={final_body}",
+        )
+        return
+
+    # 5) Query for the unique marker phrase to verify retrieval.
+    try:
+        r = requests.post(
+            f"{base}/query",
+            headers=headers,
+            json={
+                "question": f"What is the secret phrase '{marker}'?",
+                "session_id": "s-" + uuid.uuid4().hex,
+                "top_k": 3,
+            },
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        runner.record(name, False, f"network error on follow-up /query: {e}")
+        return
+    if r.status_code != 200:
+        runner.record(name, False, f"follow-up /query -> {r.status_code} {r.text[:160]}")
+        return
+    parsed = r.json()
+    sources = parsed.get("sources") or []
+    # Retrieval should surface the just-uploaded doc as a source.
+    matched = any(key in (s.get("s3_uri") or "") for s in sources)
+    runner.record(
+        name,
+        matched,
+        f"key={key} sources={len(sources)} matched={matched} status={final_status}",
+    )
+
+
 def check_conversations_list(runner: CheckRunner, base: str, token: str) -> None:
     try:
         r = requests.get(
@@ -355,12 +484,13 @@ def main() -> int:
     check_query_empty(runner, base, token)
     check_conversations_list(runner, base, token)
     check_query_stream(runner, args.stream_url, token)
+    check_upload_ingest_flow(runner, base, token)
 
     print()
     if runner.failures:
         print(f"SUMMARY: {len(runner.failures)} check(s) FAILED: {', '.join(runner.failures)}")
         return 1
-    print("SUMMARY: all 6 checks passed.")
+    print("SUMMARY: all 7 checks passed.")
     return 0
 
 

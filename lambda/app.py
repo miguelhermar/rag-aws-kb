@@ -9,11 +9,16 @@ from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
 import conversations as conversations_handler
+import uploads as uploads_handler
 from schemas import ErrorEnvelope, QueryRequest, QueryResponse
 
 AGENTCORE_RUNTIME_ARN = os.environ["AGENTCORE_RUNTIME_ARN"]
 MEMORY_ID = os.environ["MEMORY_ID"]
 CONVERSATIONS_TABLE = os.environ["CONVERSATIONS_TABLE"]
+# Phase 9b — upload + ingestion endpoints.
+DOCS_BUCKET = os.environ["DOCS_BUCKET"]
+KB_ID = os.environ["KB_ID"]
+DATA_SOURCE_ID = os.environ["DATA_SOURCE_ID"]
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 _agentcore = boto3.client("bedrock-agentcore", region_name=_REGION)
@@ -43,12 +48,15 @@ def _route(event: dict) -> tuple[str, str]:
     return event.get("httpMethod", ""), event.get("resource") or event.get("path") or ""
 
 
-def _actor_id(event: dict) -> str | None:
+def _claims(event: dict) -> dict:
     ctx = event.get("requestContext") or {}
     auth = ctx.get("authorizer") or {}
     # REST API Cognito authorizer puts claims at requestContext.authorizer.claims.
-    claims = auth.get("claims") or (auth.get("jwt") or {}).get("claims") or {}
-    return claims.get("sub")
+    return auth.get("claims") or (auth.get("jwt") or {}).get("claims") or {}
+
+
+def _actor_id(event: dict) -> str | None:
+    return _claims(event).get("sub")
 
 
 def _pad_session_id(session_id: str) -> str:
@@ -70,6 +78,7 @@ def handler(event, context):
         return _response(200, {"status": "ok"})
 
     actor_id = _actor_id(event)
+    claims = _claims(event)
 
     if method == "POST" and path.endswith("/query"):
         return _handle_query(event, actor_id, request_id, start, log)
@@ -80,6 +89,22 @@ def handler(event, context):
     if method == "GET" and "/conversations/" in path:
         session_id = (event.get("pathParameters") or {}).get("session_id", "")
         return _handle_get_conversation(actor_id, session_id, request_id, log)
+
+    # ----- Phase 9b: upload + ingestion -----
+    if method == "POST" and path.endswith("/documents"):
+        return uploads_handler.handle_create_document_upload(
+            event, claims, request_id, log, DOCS_BUCKET
+        )
+
+    if method == "POST" and path.endswith("/ingest"):
+        return uploads_handler.handle_start_ingestion(
+            event, claims, request_id, log, KB_ID, DATA_SOURCE_ID
+        )
+
+    if method == "GET" and "/ingest/" in path:
+        return uploads_handler.handle_get_ingestion_status(
+            event.get("pathParameters"), claims, request_id, log, KB_ID, DATA_SOURCE_ID
+        )
 
     envelope = ErrorEnvelope(
         error="InvalidRequest",

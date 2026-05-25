@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -161,9 +162,12 @@ def test_lambda_env_has_agentcore_runtime_arn(stacks):
 
 
 def test_buffered_lambda_env_does_not_contain_legacy_vars(stacks):
-    """Regression guard: KB_ID/MODEL_ARN/MODEL_ID belong to the agent + Phase 9a
+    """Regression guard: MODEL_ARN/MODEL_ID belong to the agent + Phase 9a
     streaming Lambda — NOT the Phase 8 buffered REST proxy. The buffered
     handler is identified by carrying AGENTCORE_RUNTIME_ARN.
+
+    NOTE: as of Phase 9b the buffered Lambda DOES carry KB_ID (needed for
+    bedrock-agent.StartIngestionJob), so KB_ID is no longer in this denylist.
     """
     _, _, _, api = stacks
     template = Template.from_stack(api)
@@ -174,9 +178,98 @@ def test_buffered_lambda_env_does_not_contain_legacy_vars(stacks):
         if "AGENTCORE_RUNTIME_ARN" not in env_vars:
             # streaming Lambda (or any future Lambda) — skip
             continue
-        assert "KB_ID" not in env_vars
         assert "MODEL_ARN" not in env_vars
         assert "MODEL_ID" not in env_vars
+
+
+# ---------------------------------------------------------------------------
+# Phase 9b — upload + ingestion route assertions
+# ---------------------------------------------------------------------------
+
+def test_api_stack_has_phase9b_routes(stacks):
+    """Phase 9b adds POST /documents, POST /ingest, GET /ingest/{job_id}."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    methods = template.find_resources("AWS::ApiGateway::Method")
+    # Existing 4 routes: GET /health, POST /query, GET /conversations,
+    # GET /conversations/{session_id}. Phase 9b adds 3 more = 7 total
+    # (plus the implicit OPTIONS preflights — count those separately).
+    real_methods = [
+        m for m in methods.values()
+        if m.get("Properties", {}).get("HttpMethod") != "OPTIONS"
+    ]
+    assert len(real_methods) == 7, (
+        f"expected 7 non-OPTIONS methods (4 existing + 3 Phase 9b), "
+        f"got {len(real_methods)}"
+    )
+
+
+def test_buffered_lambda_has_phase9b_env(stacks):
+    """Phase 9b: buffered Lambda must carry DOCS_BUCKET + KB_ID + DATA_SOURCE_ID."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    fns = template.find_resources("AWS::Lambda::Function")
+    matching = [
+        fn for fn in fns.values()
+        if "AGENTCORE_RUNTIME_ARN" in fn.get("Properties", {})
+        .get("Environment", {})
+        .get("Variables", {})
+    ]
+    assert len(matching) == 1, "expected exactly one buffered Lambda"
+    env_vars = matching[0]["Properties"]["Environment"]["Variables"]
+    for key in ("DOCS_BUCKET", "KB_ID", "DATA_SOURCE_ID"):
+        assert key in env_vars, f"buffered Lambda missing env var {key}"
+
+
+def test_buffered_lambda_has_s3_putobject_on_uploads_prefix(stacks):
+    """Phase 9b: buffered Lambda IAM must grant s3:PutObject on uploads/* only."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    policies = template.find_resources("AWS::IAM::Policy")
+    found = False
+    for pol in policies.values():
+        statements = (
+            pol.get("Properties", {}).get("PolicyDocument", {}).get("Statement", [])
+        )
+        for stmt in statements:
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            if not actions or "s3:PutObject" not in actions:
+                continue
+            resources = stmt.get("Resource")
+            if isinstance(resources, list):
+                # CDK renders cross-stack references as Fn::Join'd lists.
+                rendered = json.dumps(resources)
+            else:
+                rendered = json.dumps(resources or "")
+            if "/uploads/*" in rendered:
+                found = True
+                break
+        if found:
+            break
+    assert found, "expected s3:PutObject statement scoped to /uploads/*"
+
+
+def test_buffered_lambda_has_bedrock_ingestion_actions(stacks):
+    """Phase 9b: buffered Lambda IAM must grant StartIngestionJob + GetIngestionJob."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    policies = template.find_resources("AWS::IAM::Policy")
+    actions_found: set[str] = set()
+    for pol in policies.values():
+        statements = (
+            pol.get("Properties", {}).get("PolicyDocument", {}).get("Statement", [])
+        )
+        for stmt in statements:
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            for a in actions or []:
+                if a in ("bedrock:StartIngestionJob", "bedrock:GetIngestionJob"):
+                    actions_found.add(a)
+    assert "bedrock:StartIngestionJob" in actions_found
+    assert "bedrock:GetIngestionJob" in actions_found
 
 
 def test_query_method_requires_cognito_auth(stacks):

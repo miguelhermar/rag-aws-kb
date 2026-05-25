@@ -81,6 +81,10 @@ class ApiStack(Stack):
                 "AGENTCORE_RUNTIME_ARN": agent_stack.agent_runtime_arn,
                 "MEMORY_ID": storage_stack.memory_id,
                 "CONVERSATIONS_TABLE": storage_stack.conversations_table_name,
+                # Phase 9b — upload + ingestion endpoints.
+                "DOCS_BUCKET": storage_stack.docs_bucket.bucket_name,
+                "KB_ID": storage_stack.knowledge_base_id,
+                "DATA_SOURCE_ID": storage_stack.data_source_id,
                 "LOG_LEVEL": "INFO",
             },
             log_group=log_group,
@@ -167,6 +171,63 @@ class ApiStack(Stack):
             integration,
             authorization_type=apigw.AuthorizationType.COGNITO,
             authorizer=authorizer,
+        )
+
+        # =====================================================================
+        # Phase 9b — upload + ingestion routes (REST, Cognito-authed)
+        # =====================================================================
+        # POST /documents       -> mint presigned PUT URL
+        # POST /ingest          -> bedrock-agent.StartIngestionJob
+        # GET  /ingest/{job_id} -> bedrock-agent.GetIngestionJob
+        #
+        # Same buffered Lambda — these are point-in-time control-plane calls,
+        # not streaming. IAM:
+        #   - s3:PutObject  on docs_bucket/uploads/*    (least-privilege; the
+        #     signer's permissions are inherited by every presigned URL).
+        #   - bedrock:StartIngestionJob / GetIngestionJob on the KB ARN.
+        documents = api.root.add_resource("documents")
+        documents.add_method(
+            "POST",
+            integration,
+            authorization_type=apigw.AuthorizationType.COGNITO,
+            authorizer=authorizer,
+        )
+
+        ingest = api.root.add_resource("ingest")
+        ingest.add_method(
+            "POST",
+            integration,
+            authorization_type=apigw.AuthorizationType.COGNITO,
+            authorizer=authorizer,
+        )
+
+        ingest_by_id = ingest.add_resource("{job_id}")
+        ingest_by_id.add_method(
+            "GET",
+            integration,
+            authorization_type=apigw.AuthorizationType.COGNITO,
+            authorizer=authorizer,
+        )
+
+        # IAM: presigned-URL signer needs PutObject on the upload prefix only.
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObject"],
+                resources=[f"{storage_stack.docs_bucket.bucket_arn}/uploads/*"],
+            )
+        )
+
+        # IAM: KB ingestion control plane. Per AWS docs the resource ARN for
+        # StartIngestionJob / GetIngestionJob is the KnowledgeBase ARN (not the
+        # data-source ARN — data sources are URI-pathed sub-resources).
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:StartIngestionJob",
+                    "bedrock:GetIngestionJob",
+                ],
+                resources=[storage_stack.knowledge_base_arn],
+            )
         )
 
         CfnOutput(self, "ApiUrl", value=api.url, export_name="RagAws-ApiUrl")
