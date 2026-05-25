@@ -2,9 +2,9 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-24 (evening), after completing Phase 6 (Streamlit client + smoke test + eval harness, all verified live against fresh redeploy). Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in the bundled commit referenced as the most recent on `main`.
+**Last updated**: 2026-05-24 (late evening), after completing Phase 7 (final reviewer-facing README — last phase of the project). All 7 phases are complete; the deliverable is ready for interview submission. Commits: Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in `49d7ecc`, Phase 7 in the bundled commit referenced as the most recent on `main`.
 
-**Important**: between the last session and this one, Miguel ran `cdk destroy ApiStack StorageStack` to zero out idle AWS cost. Phase 6 began with a full redeploy of both stacks. All resource IDs in §8 are FRESH from the 2026-05-24-evening redeploy — the IDs in earlier session-handoff revisions are stale and should be ignored.
+**Important**: between the previous session and the Phase 6 session, Miguel ran `cdk destroy` to zero out idle AWS cost; Phase 6 redeployed both stacks. As of the end of Phase 7 the stacks are still deployed and the live API at the URL in §8 is responding 200 to `/health`. If Miguel runs `cdk destroy` again after submission, the IDs in §8 will be stale — but the README ([README.md](README.md)) is now the canonical reviewer entry point and explicitly notes that IDs rotate per redeploy.
 
 ---
 
@@ -61,7 +61,7 @@ The user (Miguel) is productionizing a Streamlit + Gemini + FAISS RAG prototype 
 | 4 | CDK ApiStack (Lambda + APIGW + auth) | ✅ Complete + **deployed and smoke-tested live** |
 | 5 | Operator scripts (upload_docs, start_ingestion, rotate_api_key) + end-to-end RAG | ✅ Complete + **6 docs ingested, in-corpus & off-corpus smoke tests green live** |
 | 6 | Streamlit client + smoke test + eval harness | ✅ Complete + **smoke 4/4 green live, eval 100% in-corpus source-match, Streamlit boots clean** |
-| 7 | Final README + cleanup + hardening notes | ⏭️ NEXT (docs-only) |
+| 7 | Final README + cleanup + hardening notes | ✅ Complete — [README.md](README.md) covers all brief §14.3 sub-bullets + ASCII architecture diagram + evidence section + evaluation reflection + production hardening + cleanup |
 
 See full phase briefs (goals, files, DoD, prereqs) in [PLAN.md §"Implementation phases"](PLAN.md).
 
@@ -340,41 +340,55 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24 evening after Miguel an
 
 ---
 
-## 16. Next phase brief (Phase 7 — Final README + cleanup + hardening notes)
+## 16. Phase 7 — what we did
 
-**Goal**: Reviewer can stand up + tear down the entire system in <30 minutes using only the README. The README satisfies brief [§14.3](AWS%20Native%20Knowledge%20Base%20Agent%20Candidate%20Project%20Brief.md) ("Documentation Requirements").
+Done **inline by the Claude orchestrator** (no sub-agent — docs-only synthesis benefits from full session context). 2026-05-24 late evening.
 
-**Files**:
-- [README.md](README.md) — full rewrite (currently a stub from Phase 1).
-- *Possibly* an `architecture.png` or `architecture.svg` (a simple service-flow diagram). If we don't want to bother with image generation, an ASCII diagram in the README is acceptable.
-- No code changes intended. If we choose to clean up the `RAG-demo/`-era shebangs in `venv/`, that's a one-line `rm -rf venv && python3 -m venv venv && venv/bin/pip install -r tests/requirements.txt` — but it's optional and worth a brief conversation first.
+**Files written**:
+- [README.md](README.md) — 545-line reviewer-facing README, full rewrite of the Phase-1 stub. Covers every brief §14.3 sub-bullet plus brief §11 (evaluation with weak/ambiguous case discussion).
 
-**README sections required by brief §14.3 + our internal lessons**:
-1. **Overview** — one-paragraph what this is + the live status (resource IDs come from `cdk-outputs.json`, not hardcoded).
-2. **Architecture diagram** — services + data flow. AWS-only path: Client (Streamlit) → APIGW (API key) → Lambda (container) → Bedrock Retrieve (KB on S3 Vectors) → Bedrock InvokeModel (Haiku 4.5 inference profile) → response with grounded citations + confidence.
-3. **Services used** — APIGW REST, Lambda container, S3 (docs), S3 Vectors (index), Bedrock KB, Bedrock Runtime, Titan v2 embeddings, Secrets Manager, CloudWatch Logs, IAM. One line per service.
-4. **API contract** — request/response/error schemas (copy from [lambda/schemas.py](lambda/schemas.py) and [PLAN.md §"Schemas"](PLAN.md)) + auth header (`x-api-key`).
-5. **RAG behavior** — chunking (FIXED_SIZE 300/20%), retrieval (top-k cosine over Titan v2), prompt (grounded with `INSUFFICIENT_CONTEXT` literal), confidence formula, INSUFFICIENT_ANSWER override.
-6. **Sample docs** — list the 6 fictional Acme Notes docs + the seed prompt that generated them.
-7. **How to deploy** — `cdk bootstrap` → `cdk deploy StorageStack ApiStack` → `python scripts/upload_docs.py` → `python scripts/start_ingestion.py` → copy `streamlit_client/.streamlit/secrets.toml.example` → `streamlit run streamlit_client/app.py`. Each step with one-line "why" and an indicative wall-clock.
-8. **How to verify** — `python scripts/smoke_test.py` (must exit 0) + `python tests/eval/run_eval.py` (writes a fresh `eval_results.md`).
-9. **How to tear down** — `cdk destroy ApiStack StorageStack --force`. Note that `autoDeleteObjects=True` empties the docs bucket and that `AwsCustomResource.onDelete` handles the vector index. Mention that ECR image (Lambda asset) stays until the asset cleanup lambda runs — manual `aws ecr delete-repository` may be required for full cost zero.
-10. **Changes from sample / what we replaced** — link `legacy/` and explain that FAISS → S3 Vectors, Gemini → Bedrock Claude Haiku 4.5, in-process loaders → KB ingestion, in-process retrieval → KB Retrieve, no FastAPI (handler is Lambda native).
-11. **AI tools used in build** — Claude Code orchestration + sub-agents, with the phased approach + trust-but-verify gate at each phase.
-12. **Assumptions made** — `us-east-1`-only, account `954863244564`, model access pre-enabled, ~$1 active spend cap, manual ingestion (no event-driven), API-key auth (not Cognito).
-13. **Data flow security note** — explain explicitly that requests/responses never leave AWS (no third-party APIs in the runtime path), the API key is the only outbound secret (delivered to the local Streamlit client via `secrets.toml`), and CloudWatch Logs are the only place a question is persisted server-side.
-14. **Hardening notes — what we'd do for production** — copy [PLAN.md §"Production hardening"](PLAN.md): VPC + interface endpoints, WAF, KMS CMKs, X-Ray tracing, CloudWatch budget alarms at $10/$18, per-identity rate limiting via Cognito JWT, output PII redaction, Bedrock model fallback (Haiku → Sonnet), async ingestion pipeline (S3 → EventBridge → Step Function), SnapStart when GA for container Lambdas. Add the Phase 5 lesson (model deprecation guardrails) and the Phase 6 lesson (prompt-tune for ambiguous questions if multi-doc synthesis is desired).
-15. **Leaked-secret note** — the legacy `.env` at repo root still contains a Gemini key from the original prototype (gitignored, never pushed, but lives on Miguel's disk). New stack does not use Gemini; the key should be rotated/deleted by Miguel.
+**README structure** (15 sections):
+1. Title + live-status one-liner.
+2. ASCII architecture diagram (~75 lines, numbered request-flow steps 1-8 + secret-flow callout) + 1.1 summary + 1.2 key-tradeoffs table covering 9 decisions.
+3. AWS services + CDK stacks (single combined table; both StorageStack + ApiStack explained).
+4. API contract & authentication (endpoints, request, response, error envelope, full auth flow including rotation gotcha + production path to Cognito).
+5. RAG behavior (ingestion, retrieval, prompt construction, confidence formula, INSUFFICIENT_ANSWER override).
+6. Sample documents table.
+7. Demo evidence — full live request/response with CloudWatch log lines.
+8. Evaluation: aggregate metrics + good examples + weak/ambiguous (q07 + q08 framed as "design success not failure") + reflection on improvements.
+9. Changes from sample project (12-row table mapping legacy → this solution + why).
+10. AI tools used during development (Claude Code orchestration story + 2 documented incidents).
+11. Production hardening — what's implemented vs what's documented-but-not-implemented.
+12. Run instructions (deploy / seed / validate / streamlit / teardown with cost).
+13. Repository layout.
+14. Assumptions, known limitations, data flow (AWS-only callout), testing matrix.
+15. Closing.
 
-**Verification before declaring Phase 7 done**:
-1. A fresh reader of just the README can run through the 6 steps and end up with a working system. Test this by following our own README from a clean shell.
-2. All file references in the README resolve (no broken markdown links).
-3. `git status` clean; nothing uncommitted.
-4. Final `git log` shows a sensible phase-based commit history.
+**Verification done** before commit:
+- `wc -l README.md` → 545 lines (~4-5 pages dense markdown — slightly over brief's 2-4 page guideline because Miguel explicitly asked for "very, very complete").
+- 28 file references checked, all resolve.
+- `curl ${API_URL}health` → 200 (live system still responding, so the "Live as of last commit" claim in §15 holds).
 
-**Cost note**: docs-only phase = $0 active cost. (No new AWS deploys planned; if `cdk destroy` is run after the README is verified, idle cost drops to $0 once the ECR repo is removed.)
+**Sub-agent deviations**: none (no sub-agent used).
 
-**How to execute**: probably inline by the orchestrator rather than a sub-agent — it's a docs-only phase and the synthesis benefits from full session context. If Miguel prefers a sub-agent (e.g., to draft a first cut while the orchestrator does something else), use that pattern; the existing handoff doc gives the sub-agent enough context to write a strong README.
+**Open items left for the user**:
+- Visual review of the README rendered on GitHub (markdown table widths + ASCII diagram width survive in GH's monospace code block) — orchestrator can't browse.
+- Optional: delete `venv/` and recreate (the legacy `RAG-demo/` shebangs are documented as a known limitation in [README.md §13.2](README.md) but harmless; cleanup is a nice-to-have).
+- Optional: rotate / delete the leaked Gemini key in legacy `.env` (gitignored, never pushed, but lives on disk) — flagged in README §8 changes table.
+- Optional: `cdk destroy` after submission to zero idle cost. README §11.5 documents the command + the lingering-ECR-repo cleanup.
+
+**Cost incurred this phase**: $0 active (docs-only; no AWS calls beyond one `/health` curl). Cumulative project total still well under $1.
+
+---
+
+## 17. Project status — DONE
+
+All 7 phases complete. The deliverable is interview-ready. The system is live in `us-east-1` at the URL in §8 (the README is the canonical doc; this handoff is now mostly an archival record of how we got here).
+
+The README is the single source of truth for any future reader (reviewer or future-Claude). This handoff doc retains value for:
+- The phase-by-phase build narrative (§5, §6, §11, §12, §13, §15, §16).
+- The two production lessons in §14 (out-of-band-AWS-changes rule + model-deprecation incident).
+- Live resource IDs as last observed (§8) — these are stale the moment the user runs `cdk destroy`.
 
 ---
 
@@ -389,6 +403,14 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24 evening after Miguel an
 
 ---
 
-## 18. Closing pointer
+## 18. Closing pointer (post-project)
 
-If you start a new session: read this file end-to-end, then [PLAN.md](PLAN.md). Then check whether the stacks are deployed (see §17 last bullet). Then ask Miguel: **"Ready to start Phase 7 (final README + cleanup + hardening notes)? The system is fully deployed and verified end-to-end — Phase 7 is the docs-only wrap that makes the project reviewable in <30 minutes."** Do not re-derive decisions from scratch; the decisions in §3 are final unless Miguel explicitly reopens them.
+The project is complete. If you start a new session in this repo:
+
+1. **Read [README.md](README.md) first** — it is now the canonical entry point and supersedes this handoff doc for anything reviewer-facing.
+2. Read this handoff doc only if you need historical context: how decisions were made, what the two production incidents taught us (§14), the phase-by-phase build log.
+3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan.
+4. **Before assuming the live system is up**, check `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` — Miguel may have destroyed the stacks to zero cost after submission.
+5. If asked to extend the project, do not re-litigate decisions in §3 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
+
+If asked: **"What's left?"** — the answer is "nothing required; only the optional cleanup items in §16."
