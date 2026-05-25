@@ -170,7 +170,7 @@ with st.sidebar:
         sid = conv.get("session_id") or conv.get("id") or ""
         if not sid:
             continue
-        label = conv.get("title") or conv.get("preview") or sid
+        label = conv.get("conversation_name") or conv.get("title") or conv.get("preview") or sid
         if st.button(label, key=f"conv-{sid}"):
             st.session_state.session_id = sid
             st.session_state.messages = _load_conversation(sid)
