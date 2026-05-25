@@ -2,7 +2,7 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-25 (late afternoon), after completing **Phase 9** — streaming responses (9a) + upload + ingestion endpoint (9b). All 9 phases are complete; live end-to-end verified including a fresh redeploy + multi-turn DDB/Memory inspection + streaming + custom upload + retrieval. Commits: Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in `49d7ecc`, Phase 7 in the bundled commit on `main`, Phase 8 in `f9d55d3`, sidebar fix in `4e5c7da`, Phase 9a in `fe865c5`, Phase 9b in `08464ac`. README ([README.md](README.md)) has been **fully rewritten for Phase 8 + 9** state — it is now the canonical reviewer entry point again.
+**Last updated**: 2026-05-25 (late evening), after **Phase 10 — developer-loop polish**: added `scripts/run_streamlit.sh` which auto-syncs `secrets.toml` from live CloudFormation + Secrets Manager, so the daily loop is now exactly `cdk deploy --all` then `./scripts/run_streamlit.sh`. No manual editing of `secrets.toml` ever again. See §23. (Earlier today: **Phase 9** — streaming (9a) + upload + ingestion (9b). Phases 1-3 in `e3925e5`, 4 in `e7c6d14`, 5 in `20add17`, handoff cleanup in `602822d`, 6 in `49d7ecc`, 7 in the bundled commit on `main`, 8 in `f9d55d3`, sidebar fix in `4e5c7da`, 9a in `fe865c5`, 9b in `08464ac`, Phase 10 pending commit.) README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 now has the two-command TL;DR.
 
 **Important**: between the previous session and the Phase 6 session, Miguel ran `cdk destroy` to zero out idle AWS cost; Phase 6 redeployed both stacks. As of the end of Phase 7 the stacks are still deployed and the live API at the URL in §8 is responding 200 to `/health`. If Miguel runs `cdk destroy` again after submission, the IDs in §8 will be stale — but the README ([README.md](README.md)) is now the canonical reviewer entry point and explicitly notes that IDs rotate per redeploy.
 
@@ -625,7 +625,7 @@ Three things to know going into the next session that the current source + commi
 
 3. **AgentCore Runtime is buffered-only and will likely stay that way for the near future.** Don't waste time looking for `InvokeAgentRuntime`-with-streaming; it doesn't exist as of May 2026. The Phase 9a streaming Lambda intentionally bypasses AgentCore Runtime and writes Memory + DDB itself after the stream — that duplication (Memory + DDB write logic in both `agent/rag.py` and `lambda_stream/stream_app.py`) is a deliberate consequence, not tech debt to consolidate. If/when AgentCore exposes streaming, the duplication can collapse.
 
-4. **The Streamlit `secrets.toml` must have EVERY `[auth]` key populated** for `st.login()` to start. Any field left as the placeholder string causes Streamlit to abort during initial import (not on first user click) with a non-obvious error. The README §10.4 lists the seven keys + their CDK-output sources; treat it as a checklist on every fresh setup.
+4. **The Streamlit `secrets.toml` must have EVERY `[auth]` key populated** for `st.login()` to start. Any field left as the placeholder string causes Streamlit to abort during initial import (not on first user click) with a non-obvious error. **Obsoleted as a manual task in Phase 10** (2026-05-25) — `./scripts/run_streamlit.sh` now auto-syncs the file from live CloudFormation + Secrets Manager on every launch. Don't hand-edit `secrets.toml`; just use the launcher.
 
 ### 22.5 What's new vs. the Phase 8 baseline
 
@@ -648,15 +648,84 @@ Cumulative project total still well under **$2.50** of the $20 budget. **Run `cd
 
 ---
 
+## 23. Phase 10 — developer-loop polish (2026-05-25, late session)
+
+Short session. No infra, no Bedrock, no AWS billable changes. The two-command developer loop Miguel wanted was on his head: "after `cdk deploy`, I should just run Streamlit — no secrets editing, ever."
+
+### 23.1 The symptom
+
+Miguel opened Streamlit and clicked **Log in with Cognito** → generic "authentication error" on the page. Root cause was diagnosed live in this session: `streamlit_client/.streamlit/secrets.toml` was frozen at Phase 8 IDs. The Phase 9 `cdk destroy --all` + redeploy had rotated every Cognito and API ID:
+
+| Field | Stale (Phase 8) | Live (Phase 9) |
+|---|---|---|
+| `UserPoolId` | `us-east-1_F4uFIQdMN` | `us-east-1_wlw5ZVNk1` |
+| `UserPoolClientId` | `6n2reutf71tjagf89a4kr7v9h3` | `2thda93iqaq2ef8jqfhrum3kpv` |
+| App Client secret | old | refetched from Secrets Manager |
+| `ApiUrl` | `qf915n6z4i...` | `o2jci6mjmc...` |
+| `[stream]` section | missing entirely | now present |
+
+Streamlit was POSTing the OIDC discovery request to a user pool that no longer exists → Cognito 404 → Streamlit surfaces it as "authentication error". No AWS-side fix needed; just the secrets file.
+
+### 23.2 The fix
+
+New file: [scripts/run_streamlit.sh](scripts/run_streamlit.sh) (bash, +x, ~70 lines). It:
+- Calls `aws cloudformation describe-stacks` against `AuthStack` + `ApiStack` and extracts `UserPoolId`, `UserPoolClientId`, `UserPoolClientSecretArn`, `ApiUrl`, `StreamFunctionUrl` via JMESPath. **Does NOT read `cdk-outputs.json`** — that file is only written when `--outputs-file` is passed to `cdk deploy`, easy to forget. Pulling from CFN directly makes the script depend only on "stacks are deployed."
+- Calls `aws secretsmanager get-secret-value` for the App Client secret.
+- Preserves an existing `cookie_secret` across reruns (grep + sed extraction) so live Streamlit session cookies survive. Mints a fresh 32-byte hex one only if missing or still set to the placeholder string.
+- Writes `streamlit_client/.streamlit/secrets.toml` with all `[auth]` + `[api]` + `[runtime]` + `[stream]` keys populated.
+- `exec`s `./venv/bin/python -m streamlit run streamlit_client/app.py "$@"` (or `streamlit run …` fallback if `venv/` isn't there). Passes through any extra CLI args.
+- Fails loudly if any required output is missing: `error: output 'UserPoolId' not found on stack 'AuthStack'. Did you run 'cd infra && cdk deploy --all'?`
+
+Miguel's new developer loop is now exactly:
+```bash
+cd infra && env -u PYTHONPATH cdk deploy --all --require-approval never && cd ..
+./scripts/run_streamlit.sh
+```
+
+No `--outputs-file` flag needed. No manual `secrets.toml` editing, ever.
+
+### 23.3 Docs updated
+
+- [README.md](README.md) §10.0 — new "TL;DR — returning developer, two-command loop" subsection at the top of §10.
+- [README.md](README.md) §10.4 — full rewrite of "Run the local Streamlit client" to describe the launcher; old multi-line manual cheat-sheet for filling each `secrets.toml` key is removed.
+- [README.md](README.md) §7 — added a 7th gotcha: "redeploy rotates every ID → `secrets.toml` will be stale → use the launcher." Documents the exact symptom Miguel hit so a future reviewer/Claude recognizes the pattern instantly.
+- [SESSION_HANDOFF.md](SESSION_HANDOFF.md) §22.4a #4 — annotated as obsoleted by Phase 10; the launcher replaces the "every key populated" checklist.
+
+### 23.4 Verification
+
+- Dry-ran the launcher locally: `secrets.toml` rewritten was byte-identical to the hand-fixed version that got login working. `diff` clean.
+- Cognito sanity checks done before declaring success: OIDC discovery doc on `us-east-1_wlw5ZVNk1` resolves; Hosted UI domain `ragkb-244564` exists; App Client `2thda93iqaq2ef8jqfhrum3kpv` has `http://localhost:8501/oauth2callback` whitelisted, `code` flow, `openid email profile` scopes. The "Log in with Cognito" button works end-to-end after the secrets sync (Miguel confirmed live).
+- `chmod +x scripts/run_streamlit.sh` applied.
+
+### 23.5 Cost incurred this phase
+
+$0. Read-only AWS calls (CFN describe-stacks + Secrets Manager get-secret-value). No Bedrock, no Lambda invocations, no S3 puts.
+
+### 23.6 Things future-Claude should know about Phase 10
+
+- The launcher is **the** developer entry point. If Miguel reports any auth/login confusion, **first check that he's running `./scripts/run_streamlit.sh` rather than `streamlit run …` directly**. The latter will use whatever stale `secrets.toml` is on disk.
+- The launcher is intentionally region-aware via `${AWS_REGION:-us-east-1}` but the rest of the project pins `us-east-1`. Don't generalize without checking CDK pin in [infra/app.py](infra/app.py).
+- `cookie_secret` preservation matters: if you rewrite the launcher to always regenerate it, you'll invalidate any in-browser Streamlit session and Miguel has to re-log-in. Annoying. Keep the grep-existing-then-mint-if-missing pattern.
+- The `--outputs-file ../cdk-outputs.json` flag in §10.1 of the README is still useful (lots of scripts in `scripts/` and `tests/eval/` read from it). The launcher is the **one** exception that avoids the dependency. Don't refactor the other scripts onto CFN describe-stacks unless asked — it's a perf trade-off (CFN API is 200–500ms per stack, jq on a local file is microseconds).
+- The README's §1 architecture diagram still references `secrets.toml` as a config artifact — that's accurate, the file still exists; only the mechanism for filling it changed.
+
+### 23.7 Memory updates
+
+- New feedback memory [[feedback-streamlit-secrets-auto-sync]] codifying "always launch via `./scripts/run_streamlit.sh`; never hand-edit `secrets.toml`."
+- [[project-phase8-9-extensions-done]] left alone (Phase 10 isn't an extension — it's developer-experience polish on existing functionality).
+
+---
+
 ## 20. Closing pointer (post-project)
 
 The core project is complete. If you start a new session in this repo:
 
-1. **Read [README.md](README.md) first** — it is now the canonical entry point and supersedes this handoff doc for anything reviewer-facing.
-2. Read this handoff doc only if you need historical context: how decisions were made, what the two production incidents taught us (§14), the phase-by-phase build log.
+1. **Read [README.md](README.md) first** — it is now the canonical entry point and supersedes this handoff doc for anything reviewer-facing. §10.0 has the two-command developer loop.
+2. Read this handoff doc only if you need historical context: how decisions were made, what the two production incidents taught us (§14), the phase-by-phase build log. Most recent phase = §23 (Phase 10 — `scripts/run_streamlit.sh` developer-loop polish).
 3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan.
 4. **Before assuming the live system is up**, check `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` — Miguel may have destroyed the stacks to zero cost after submission.
-5. If asked to extend the project, do not re-litigate decisions in §3 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
-6. **If Miguel asks about "optional extensions" or "what's next"**, point at [§19](#19-optional-extensions--candidate-list-for-future-sessions) and let him pick. Do not implement any of them proactively.
+5. **If Miguel reports auth/login problems in Streamlit**, the very first check is whether he's launching via `./scripts/run_streamlit.sh` (it auto-syncs `secrets.toml` from live AWS). Stale `secrets.toml` post-redeploy is the most likely cause and surfaces as a generic "authentication error" on the login button. See §23.
+6. If asked to extend the project, do not re-litigate decisions in §3 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
+7. **If Miguel asks about "optional extensions" or "what's next"**, point at [§19](#19-optional-extensions--candidate-list-for-future-sessions) and let him pick. Do not implement any of them proactively.
 
 If asked: **"What's left?"** — the answer is "nothing *required*; **5 of 8 optional extensions are now done** (DDB + AgentCore Runtime + AgentCore Memory in Phase 8; streaming + upload/ingest in Phase 9; plus Cognito JWT as a bonus). The remaining items in [§19](#19-optional-extensions--candidate-list-for-future-sessions) are CI/CD, guardrails/safety filters, human-feedback collection, and cost-controls / token-tracking."
