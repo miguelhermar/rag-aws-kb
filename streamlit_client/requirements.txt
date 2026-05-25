@@ -1,3 +1,7 @@
-streamlit==1.57.0
+streamlit==1.56.0
 requests==2.34.2
-Authlib==1.7.2
+Authlib==1.6.12
+# Streamlit 1.57.0's Starlette auth logout path calls Authlib's async
+# load_server_metadata() without awaiting it. Stay on 1.56 until the upstream
+# Starlette auth fix is released.
+uvicorn>=0.30.0
