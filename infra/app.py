@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDK app entry point. Phase 2: StorageStack. Phase 4: ApiStack."""
+"""CDK app entry point. Phase 8: StorageStack + AuthStack + AgentStack + ApiStack."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.dirname(_INFRA_DIR))
 
 import aws_cdk as cdk  # noqa: E402
 
+from infra.stacks.agent_stack import AgentStack  # noqa: E402
 from infra.stacks.api_stack import ApiStack  # noqa: E402
+from infra.stacks.auth_stack import AuthStack  # noqa: E402
 from infra.stacks.storage_stack import StorageStack  # noqa: E402
 
 # Region is locked: S3 Vectors GA regions are limited and Bedrock model availability is widest
@@ -49,16 +51,36 @@ storage_stack = StorageStack(
     app,
     "StorageStack",
     env=env,
-    description="RAG-AWS Phase 2: S3 docs bucket, S3 Vectors index, Bedrock KB, API key secret.",
+    description="RAG-AWS: S3 docs bucket, S3 Vectors index, Bedrock KB, DynamoDB conversations, AgentCore Memory.",
 )
+
+auth_stack = AuthStack(
+    app,
+    "AuthStack",
+    env=env,
+    description="RAG-AWS Phase 8: Cognito User Pool + App Client + Hosted UI + test user.",
+)
+
+agent_stack = AgentStack(
+    app,
+    "AgentStack",
+    env=env,
+    storage_stack=storage_stack,
+    description="RAG-AWS Phase 8: Bedrock AgentCore Runtime (container image).",
+)
+agent_stack.add_dependency(storage_stack)
 
 api_stack = ApiStack(
     app,
     "ApiStack",
     env=env,
     storage_stack=storage_stack,
-    description="RAG-AWS Phase 4: Lambda container + API Gateway REST API with API-key auth.",
+    auth_stack=auth_stack,
+    agent_stack=agent_stack,
+    description="RAG-AWS Phase 8: Lambda proxy + REST API with Cognito JWT auth.",
 )
 api_stack.add_dependency(storage_stack)
+api_stack.add_dependency(auth_stack)
+api_stack.add_dependency(agent_stack)
 
 app.synth()

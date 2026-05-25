@@ -11,9 +11,10 @@ References:
 from __future__ import annotations
 
 from aws_cdk import CfnOutput, RemovalPolicy, Stack
+from aws_cdk import aws_bedrockagentcore as bedrockagentcore
+from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_s3 as s3
-from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
 
 from infra.constructs.bedrock_kb import BedrockS3VectorsKnowledgeBase
@@ -112,22 +113,28 @@ class StorageStack(Stack):
             docs_bucket=docs_bucket,
         )
 
-        # --- API key secret (consumed by ApiStack in Phase 4) ----------------
-        # JSON shape: {"apiKey": "<32 alnum chars>"} — ApiStack reads via
-        #   secret.secret_value_from_json("apiKey")
-        api_key_secret = secretsmanager.Secret(
+        # --- Conversations table (Phase 8) -----------------------------------
+        conversations_table = dynamodb.Table(
             self,
-            "ApiKeySecret",
-            description="API Gateway x-api-key value for the RAG service.",
-            generate_secret_string=secretsmanager.SecretStringGenerator(
-                secret_string_template='{"apiKey": ""}',
-                generate_string_key="apiKey",
-                password_length=32,
-                exclude_punctuation=True,
-                exclude_characters='"@/\\',
-                include_space=False,
+            "ConversationsTable",
+            partition_key=dynamodb.Attribute(
+                name="actor_id", type=dynamodb.AttributeType.STRING
             ),
+            sort_key=dynamodb.Attribute(
+                name="session_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        # --- AgentCore Memory (Phase 8) --------------------------------------
+        # 30 day raw-event retention. No strategies (short-term only); AgentCore
+        # writes USER + ASSISTANT items per turn via CreateEvent from inside the agent.
+        memory = bedrockagentcore.CfnMemory(
+            self,
+            "AgentMemory",
+            name="rag_aws_memory",
+            event_expiry_duration=30,
         )
 
         # --- Outputs (exact names consumed by Phase 4 / scripts) -------------
@@ -159,20 +166,35 @@ class StorageStack(Stack):
         )
         CfnOutput(
             self,
-            "ApiKeySecretArn",
-            value=api_key_secret.secret_arn,
-            export_name="RagAws-ApiKeySecretArn",
-        )
-        CfnOutput(
-            self,
             "DataSourceId",
             value=kb.data_source_id,
             export_name="RagAws-DataSourceId",
         )
+        CfnOutput(
+            self,
+            "ConversationsTableName",
+            value=conversations_table.table_name,
+            export_name="RagAws-ConversationsTableName",
+        )
+        CfnOutput(
+            self,
+            "MemoryId",
+            value=memory.attr_memory_id,
+            export_name="RagAws-MemoryId",
+        )
+        CfnOutput(
+            self,
+            "MemoryArn",
+            value=memory.attr_memory_arn,
+            export_name="RagAws-MemoryArn",
+        )
 
-        # Expose for downstream stacks within the same app (Phase 4).
+        # Expose for downstream stacks within the same app.
         self.docs_bucket = docs_bucket
         self.knowledge_base_id = kb.knowledge_base_id
         self.knowledge_base_arn = kb.knowledge_base_arn
-        self.api_key_secret = api_key_secret
         self.data_source_id = kb.data_source_id
+        self.conversations_table = conversations_table
+        self.conversations_table_name = conversations_table.table_name
+        self.memory_id = memory.attr_memory_id
+        self.memory_arn = memory.attr_memory_arn

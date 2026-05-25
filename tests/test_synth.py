@@ -1,4 +1,4 @@
-"""Synth-time assertions for the CDK stacks. No AWS calls."""
+"""Synth-time assertions for the Phase 8 CDK stacks. No AWS calls."""
 
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from infra.stacks.agent_stack import AgentStack  # noqa: E402
 from infra.stacks.api_stack import ApiStack  # noqa: E402
+from infra.stacks.auth_stack import AuthStack  # noqa: E402
 from infra.stacks.storage_stack import StorageStack  # noqa: E402
 
 
@@ -22,24 +24,75 @@ def stacks():
     app = cdk.App()
     env = cdk.Environment(account="123456789012", region="us-east-1")
     storage = StorageStack(app, "StorageStack", env=env)
-    api = ApiStack(app, "ApiStack", env=env, storage_stack=storage)
-    return storage, api
+    auth = AuthStack(app, "AuthStack", env=env)
+    agent = AgentStack(app, "AgentStack", env=env, storage_stack=storage)
+    api = ApiStack(
+        app,
+        "ApiStack",
+        env=env,
+        storage_stack=storage,
+        auth_stack=auth,
+        agent_stack=agent,
+    )
+    return storage, auth, agent, api
+
+
+def test_storage_stack_has_memory_and_table(stacks):
+    storage, _, _, _ = stacks
+    template = Template.from_stack(storage)
+    template.resource_count_is("AWS::BedrockAgentCore::Memory", 1)
+    template.resource_count_is("AWS::DynamoDB::Table", 1)
+    template.has_resource_properties(
+        "AWS::DynamoDB::Table",
+        {
+            "KeySchema": [
+                {"AttributeName": "actor_id", "KeyType": "HASH"},
+                {"AttributeName": "session_id", "KeyType": "RANGE"},
+            ],
+            "BillingMode": "PAY_PER_REQUEST",
+        },
+    )
+
+
+def test_auth_stack_has_user_pool_client_and_user(stacks):
+    _, auth, _, _ = stacks
+    template = Template.from_stack(auth)
+    template.resource_count_is("AWS::Cognito::UserPool", 1)
+    template.resource_count_is("AWS::Cognito::UserPoolClient", 1)
+    template.resource_count_is("AWS::Cognito::UserPoolUser", 1)
+
+
+def test_agent_stack_has_runtime(stacks):
+    _, _, agent, _ = stacks
+    template = Template.from_stack(agent)
+    template.resource_count_is("AWS::BedrockAgentCore::Runtime", 1)
+
+
+def test_api_stack_has_no_api_key_or_usage_plan(stacks):
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    template.resource_count_is("AWS::ApiGateway::ApiKey", 0)
+    template.resource_count_is("AWS::ApiGateway::UsagePlan", 0)
+
+
+def test_api_stack_has_cognito_authorizer(stacks):
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    template.resource_count_is("AWS::ApiGateway::Authorizer", 1)
+    template.has_resource_properties(
+        "AWS::ApiGateway::Authorizer",
+        {"Type": "COGNITO_USER_POOLS"},
+    )
 
 
 def test_api_stack_has_single_lambda(stacks):
-    _, api = stacks
+    _, _, _, api = stacks
     template = Template.from_stack(api)
     template.resource_count_is("AWS::Lambda::Function", 1)
 
 
-def test_api_stack_has_single_rest_api(stacks):
-    _, api = stacks
-    template = Template.from_stack(api)
-    template.resource_count_is("AWS::ApiGateway::RestApi", 1)
-
-
-def test_lambda_env_has_kb_id_and_model_arn(stacks):
-    _, api = stacks
+def test_lambda_env_has_agentcore_runtime_arn(stacks):
+    _, _, _, api = stacks
     template = Template.from_stack(api)
     template.has_resource_properties(
         "AWS::Lambda::Function",
@@ -47,10 +100,9 @@ def test_lambda_env_has_kb_id_and_model_arn(stacks):
             "Environment": {
                 "Variables": Match.object_like(
                     {
-                        "KB_ID": Match.any_value(),
-                        "MODEL_ARN": Match.string_like_regexp(
-                            r"^arn:aws:bedrock:us-east-1::foundation-model/anthropic\.claude-3-haiku.*"
-                        ),
+                        "AGENTCORE_RUNTIME_ARN": Match.any_value(),
+                        "MEMORY_ID": Match.any_value(),
+                        "CONVERSATIONS_TABLE": Match.any_value(),
                     }
                 )
             }
@@ -58,19 +110,46 @@ def test_lambda_env_has_kb_id_and_model_arn(stacks):
     )
 
 
-def test_query_method_requires_api_key(stacks):
-    _, api = stacks
+def test_lambda_env_does_not_contain_legacy_vars(stacks):
+    """Regression guard: KB_ID/MODEL_ARN/MODEL_ID belong to the agent, not the Lambda."""
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    for fn in template.find_resources("AWS::Lambda::Function").values():
+        env_vars = (
+            fn.get("Properties", {}).get("Environment", {}).get("Variables", {})
+        )
+        assert "KB_ID" not in env_vars
+        assert "MODEL_ARN" not in env_vars
+        assert "MODEL_ID" not in env_vars
+
+
+def test_query_method_requires_cognito_auth(stacks):
+    _, _, _, api = stacks
     template = Template.from_stack(api)
     template.has_resource_properties(
         "AWS::ApiGateway::Method",
-        {"HttpMethod": "POST", "ApiKeyRequired": True},
+        {
+            "HttpMethod": "POST",
+            "AuthorizationType": "COGNITO_USER_POOLS",
+        },
     )
 
 
-def test_health_method_does_not_require_api_key(stacks):
-    _, api = stacks
+def test_conversations_method_requires_cognito_auth(stacks):
+    _, _, _, api = stacks
+    template = Template.from_stack(api)
+    # Both /conversations and /conversations/{session_id} GET methods exist.
+    methods = template.find_resources(
+        "AWS::ApiGateway::Method",
+        {"Properties": {"HttpMethod": "GET", "AuthorizationType": "COGNITO_USER_POOLS"}},
+    )
+    assert len(methods) >= 2
+
+
+def test_health_method_does_not_require_auth(stacks):
+    _, _, _, api = stacks
     template = Template.from_stack(api)
     template.has_resource_properties(
         "AWS::ApiGateway::Method",
-        {"HttpMethod": "GET", "ApiKeyRequired": False},
+        {"HttpMethod": "GET", "AuthorizationType": "NONE", "ApiKeyRequired": False},
     )

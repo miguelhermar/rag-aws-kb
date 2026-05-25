@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Smoke test for the deployed RAG-AWS API.
+"""Smoke test for the deployed RAG-AWS API (Cognito JWT auth).
 
 Exits 0 iff:
-  1. GET /health  -> 200 {"status":"ok"}
-  2. POST /query (valid key, valid body) -> 200, schema-valid QueryResponse,
-     non-empty sources, confidence in [0, 1].
-  3. POST /query without x-api-key       -> 403
-  4. POST /query with empty question     -> 400 error="InvalidRequest"
-
-Defaults are pulled from cdk-outputs.json, matching scripts/upload_docs.py style.
-The API key is fetched from Secrets Manager and never printed.
+  1. GET  /health                                 -> 200 {"status":"ok"}
+  2. POST /query (valid Bearer token)             -> 200, schema-valid QueryResponse,
+                                                     non-empty sources, confidence in [0,1]
+  3. POST /query (no Authorization header)        -> 401 or 403
+  4. POST /query (empty question, valid token)    -> 400 error="InvalidRequest"
+  5. GET  /conversations (valid Bearer token)     -> 200 + JSON array
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import boto3
@@ -25,7 +24,11 @@ from botocore.exceptions import ClientError
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CDK_OUTPUTS = REPO_ROOT / "cdk-outputs.json"
 
-# Reuse lambda/schemas.py for pydantic validation of the response.
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from get_id_token import get_id_token, _fetch_password  # noqa: E402
+
 LAMBDA_DIR = REPO_ROOT / "lambda"
 if str(LAMBDA_DIR) not in sys.path:
     sys.path.insert(0, str(LAMBDA_DIR))
@@ -41,18 +44,25 @@ def _load_outputs() -> dict:
         return {}
 
 
-def _default_api_url() -> str | None:
-    return _load_outputs().get("ApiStack", {}).get("ApiUrl")
+def _api_outputs() -> dict:
+    outs = _load_outputs()
+    merged = {}
+    for stack in ("ApiStack", "AuthStack"):
+        merged.update(outs.get(stack, {}))
+    return merged
 
 
-def _default_secret_arn() -> str | None:
-    return _load_outputs().get("StorageStack", {}).get("ApiKeySecretArn")
-
-
-def _fetch_api_key(secret_arn: str, region: str) -> str:
-    sm = boto3.client("secretsmanager", region_name=region)
-    raw = sm.get_secret_value(SecretId=secret_arn)["SecretString"]
-    return json.loads(raw)["apiKey"]
+def _fetch_id_token(args) -> str:
+    password = _fetch_password(args.password_secret_arn, args.region)
+    client_secret = (
+        _fetch_password(args.client_secret_arn, args.region)
+        if getattr(args, "client_secret_arn", None)
+        else None
+    )
+    return get_id_token(
+        args.user_pool_id, args.client_id, args.username, password, args.region,
+        client_secret,
+    )
 
 
 class CheckRunner:
@@ -80,14 +90,17 @@ def check_health(runner: CheckRunner, base: str) -> None:
     runner.record("GET /health -> 200 {status:ok}", ok, f"status={r.status_code} body={body}")
 
 
-def check_query_happy(runner: CheckRunner, base: str, api_key: str) -> None:
-    payload = {"question": "What is the refund window for monthly plans?", "top_k": 3}
-    # Validate request shape too (catches local typos).
+def check_query_happy(runner: CheckRunner, base: str, token: str) -> None:
+    payload = {
+        "question": "What is the refund window for monthly plans?",
+        "session_id": "s-" + uuid.uuid4().hex,
+        "top_k": 3,
+    }
     QueryRequest.model_validate(payload)
     try:
         r = requests.post(
             f"{base}/query",
-            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json=payload,
             timeout=30,
         )
@@ -111,26 +124,30 @@ def check_query_happy(runner: CheckRunner, base: str, api_key: str) -> None:
     )
 
 
-def check_query_no_key(runner: CheckRunner, base: str) -> None:
+def check_query_no_token(runner: CheckRunner, base: str) -> None:
     try:
         r = requests.post(
             f"{base}/query",
             headers={"Content-Type": "application/json"},
-            json={"question": "anything", "top_k": 3},
+            json={"question": "anything", "session_id": "s-" + uuid.uuid4().hex, "top_k": 3},
             timeout=15,
         )
     except requests.RequestException as e:
-        runner.record("POST /query (no key) -> 403", False, f"network error: {e}")
+        runner.record("POST /query (no token) -> 401/403", False, f"network error: {e}")
         return
-    runner.record("POST /query (no key) -> 403", r.status_code == 403, f"status={r.status_code}")
+    runner.record(
+        "POST /query (no token) -> 401/403",
+        r.status_code in (401, 403),
+        f"status={r.status_code}",
+    )
 
 
-def check_query_empty(runner: CheckRunner, base: str, api_key: str) -> None:
+def check_query_empty(runner: CheckRunner, base: str, token: str) -> None:
     try:
         r = requests.post(
             f"{base}/query",
-            headers={"x-api-key": api_key, "Content-Type": "application/json"},
-            json={"question": ""},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"question": "", "session_id": "s-" + uuid.uuid4().hex},
             timeout=15,
         )
     except requests.RequestException as e:
@@ -149,38 +166,67 @@ def check_query_empty(runner: CheckRunner, base: str, api_key: str) -> None:
     )
 
 
+def check_conversations_list(runner: CheckRunner, base: str, token: str) -> None:
+    try:
+        r = requests.get(
+            f"{base}/conversations",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        runner.record("GET /conversations -> 200 array", False, f"network error: {e}")
+        return
+    body = None
+    try:
+        body = r.json()
+    except ValueError:
+        pass
+    items = body if isinstance(body, list) else (body or {}).get("conversations")
+    ok = r.status_code == 200 and isinstance(items, list)
+    runner.record(
+        "GET /conversations -> 200 array",
+        ok,
+        f"status={r.status_code} items={len(items) if isinstance(items, list) else 'n/a'}",
+    )
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description="Smoke-test the deployed RAG-AWS API.")
-    p.add_argument("--api-url", default=_default_api_url(),
-                   help="API base URL (default: ApiStack.ApiUrl from cdk-outputs.json)")
-    p.add_argument("--secret-arn", default=_default_secret_arn(),
-                   help="Secrets Manager ARN holding the API key (default: from cdk-outputs.json)")
+    outs = _api_outputs()
+    p = argparse.ArgumentParser(description="Smoke-test the deployed RAG-AWS API (Cognito JWT).")
+    p.add_argument("--api-url", default=outs.get("ApiUrl"))
+    p.add_argument("--user-pool-id", default=outs.get("UserPoolId"))
+    p.add_argument("--client-id", default=outs.get("UserPoolClientId"))
+    p.add_argument("--username", default=outs.get("TestUserName"))
+    p.add_argument("--password-secret-arn", default=outs.get("TestUserPasswordSecretArn"))
+    p.add_argument("--client-secret-arn", default=outs.get("UserPoolClientSecretArn"))
     p.add_argument("--region", default="us-east-1")
     args = p.parse_args()
 
-    if not args.api_url or not args.secret_arn:
-        print("ERROR: --api-url and --secret-arn required (cdk-outputs.json missing/incomplete)",
-              file=sys.stderr)
+    required = ["api_url", "user_pool_id", "client_id", "username", "password_secret_arn"]
+    missing = [k for k in required if getattr(args, k) is None]
+    if missing:
+        print(f"ERROR: missing required values: {missing}", file=sys.stderr)
         return 2
 
     base = args.api_url.rstrip("/")
     try:
-        api_key = _fetch_api_key(args.secret_arn, args.region)
+        token = _fetch_id_token(args)
     except ClientError as e:
-        print(f"ERROR: failed to fetch API key: {e}", file=sys.stderr)
+        print(f"ERROR: failed to fetch ID token: {e}", file=sys.stderr)
         return 2
 
     runner = CheckRunner()
     check_health(runner, base)
-    check_query_happy(runner, base, api_key)
-    check_query_no_key(runner, base)
-    check_query_empty(runner, base, api_key)
+    check_query_happy(runner, base, token)
+    check_query_no_token(runner, base)
+    check_query_empty(runner, base, token)
+    check_conversations_list(runner, base, token)
 
     print()
     if runner.failures:
         print(f"SUMMARY: {len(runner.failures)} check(s) FAILED: {', '.join(runner.failures)}")
         return 1
-    print("SUMMARY: all 4 checks passed.")
+    print("SUMMARY: all 5 checks passed.")
     return 0
 
 

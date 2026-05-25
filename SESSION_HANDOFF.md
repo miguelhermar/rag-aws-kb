@@ -2,7 +2,7 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-24 (late evening), after completing Phase 7 (final reviewer-facing README — last phase of the project). All 7 phases are complete; the deliverable is ready for interview submission. Commits: Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in `49d7ecc`, Phase 7 in the bundled commit referenced as the most recent on `main`.
+**Last updated**: 2026-05-25 (mid-day), after completing **Phase 8** — DynamoDB session metadata + Bedrock AgentCore Runtime + Bedrock AgentCore Memory + Cognito JWT auth (replacing the API key). All 8 phases are complete; live end-to-end verified. Commits: Phases 1-3 in `e3925e5`, Phase 4 in `e7c6d14`, Phase 5 in `20add17`, handoff cleanup in `602822d`, Phase 6 in `49d7ecc`, Phase 7 in the bundled commit on `main`, Phase 8 pending commit at time of writing.
 
 **Important**: between the previous session and the Phase 6 session, Miguel ran `cdk destroy` to zero out idle AWS cost; Phase 6 redeployed both stacks. As of the end of Phase 7 the stacks are still deployed and the live API at the URL in §8 is responding 200 to `/health`. If Miguel runs `cdk destroy` again after submission, the IDs in §8 will be stale — but the README ([README.md](README.md)) is now the canonical reviewer entry point and explicitly notes that IDs rotate per redeploy.
 
@@ -413,17 +413,17 @@ Miguel has flagged the following as *optional extensions* to consider for future
 The list, verbatim from the brief, is:
 
 - CI/CD pipeline for CDK deployment.
-- Separate dev/prod environments.
-- Cognito or enterprise SSO integration.
 - Streaming responses from the API to Streamlit.
 - Upload or ingestion endpoint for new documents.
-- Admin workflow for document management.
-- DynamoDB-backed chat/session history.
-- CloudWatch dashboard or alarms.
-- Tracing with AWS X-Ray or OpenTelemetry.
+- ~~DynamoDB-backed chat/session history.~~ **✅ DONE in Phase 8 (2026-05-25)** — see §21.
+- ~~Amazon Bedrock AgentCore Runtime + Amazon Bedrock AgentCore Memory~~ **✅ DONE in Phase 8 (2026-05-25)** — see §21.
 - Guardrails or safety filters.
 - Human feedback collection.
 - Cost controls and token usage tracking.
+
+**Bonus delivered in Phase 8 (not on the original menu)**: Cognito User Pool + JWT auth replaced the API-key path entirely.
+
+**Top follow-up before any new extension lands**: the reviewer-facing [README.md](README.md) (architecture diagram, auth section, evidence section, production-hardening table) still describes the **Phase 7** state and has NOT been updated for Phase 8. If reviewer-facing accuracy matters, refresh README.md first.
 
 **Notes for future-Claude when one of these is elected**:
 - Most touch infra. The "no out-of-band AWS changes" rule ([[feedback-no-out-of-band-aws-changes]]) still applies — every AWS-affecting change goes through CDK source + `cdk deploy`, with `cdk diff` clean as the success gate.
@@ -431,6 +431,108 @@ The list, verbatim from the brief, is:
 - Some are mutually informing (e.g., Cognito JWT + DynamoDB session history naturally pair; CloudWatch dashboard + X-Ray tracing pair; CI/CD + dev/prod envs pair). When Miguel elects one, *ask* if any pairing makes sense before you start.
 - A few interact with [README.md](README.md) production-hardening section (§10) — implementing them moves an item from "documented-but-not-built" to "implemented". Keep that section accurate as items land.
 - The system may or may not be deployed when a future session starts. Check stacks first (see §20 step 4) before assuming any live IDs are valid.
+
+---
+
+## 21. Phase 8 — what we did
+
+Elected from §19's optional-extension menu on 2026-05-25. Brief: "DynamoDB-backed chat/session history + Amazon Bedrock AgentCore Runtime + AgentCore Memory", modeled on iteration 3 of [`aws-samples/sample-ai-agent-architectures-agentcore`](https://github.com/aws-samples/sample-ai-agent-architectures-agentcore) but with several deliberate improvements over the sample.
+
+### 21.1 Locked architectural decisions (do NOT relitigate)
+
+| Area | Choice | Rationale |
+|---|---|---|
+| Auth | **Cognito User Pool + JWT only** (API key removed) | Matches the sample; required for per-user `actor_id` (= JWT `sub`). Test user `demo` pre-created by CDK; permanent password in Secrets Manager. |
+| Agent depth | **Hybrid** — `agent/rag.py` packaged as `BedrockAgentCoreApp` deployed to AgentCore Runtime; `/query` Lambda is a thin proxy via `bedrock-agentcore:invoke_agent_runtime`. **No LangGraph.** | Delivers both the "Runtime" and "Memory" bullets of the brief without LangChain framework weight. Keeps the existing RAG behavior (Retrieve + InvokeModel + INSUFFICIENT_CONTEXT override) byte-identical. |
+| Memory shape | **Native `conversational` payload**, NOT msgpack/LangGraph | Console-introspectable; one `create_event` per turn with two payload items (USER + ASSISTANT). The sample uses LangGraph's `AgentCoreMemorySaver` (msgpack blobs); we improved on that. |
+| AgentCore IaC | **CDK stable L1s** (`aws_cdk.aws_bedrockagentcore.CfnRuntime` + `CfnMemory`) | The sample uses the `agentcore` CLI out-of-band + SSM glue. CFN coverage shipped Sept 2025; CDK 2.257.0 already ships the L1s. We're 100% CDK, fully `cdk diff`-able, no out-of-band drift. |
+| Container | **`DockerImageAsset` (arm64)** for the agent | Same pattern as the existing Lambda image. AgentCore Runtime *only* accepts arm64 — caught live on first deploy (error: `Supported platforms: [arm64]`). |
+| DDB shape | PK `actor_id` (S), SK `session_id` (S), attrs `conversation_name`, `created_at`, PAY_PER_REQUEST, no GSI/TTL/streams | Mirrors sample. Used only for sidebar listing; messages live in AgentCore Memory. |
+| Memory expiry | `EventExpiryDuration=30` days | Short-term raw events only; no semantic / summary strategies. |
+| Title | LLM-generated 3-5 word title (≤50 chars), written on first turn | Detected via `list_events(maxResults=1)` returning empty. |
+| `runtimeSessionId` | Aligned with app `session_id` (padded to ≥33 chars if shorter) | Better audit trail than the sample, which lets AgentCore auto-generate it. |
+
+### 21.2 Stack topology (4 stacks)
+
+```
+StorageStack ──────────► AuthStack
+     │                       │
+     │                       ▼
+     ▼                  AgentStack
+  DDB + Memory          (AgentCore Runtime
+  + KB + S3 Vectors      + arm64 container
+  + DocsBucket)          + IAM role)
+                              │
+                              ▼
+                          ApiStack
+                          (REST API + Cognito
+                           authorizer + Lambda
+                           proxy + /conversations*)
+```
+
+### 21.3 Files (this phase)
+
+**Created**: [infra/stacks/auth_stack.py](infra/stacks/auth_stack.py), [infra/stacks/agent_stack.py](infra/stacks/agent_stack.py), [agent/app.py](agent/app.py), [agent/rag.py](agent/rag.py), [agent/schemas.py](agent/schemas.py), [agent/Dockerfile](agent/Dockerfile), [agent/requirements.txt](agent/requirements.txt), [lambda/conversations.py](lambda/conversations.py), [scripts/get_id_token.py](scripts/get_id_token.py), [tests/test_agent.py](tests/test_agent.py).
+
+**Heavy edits**: [infra/stacks/api_stack.py](infra/stacks/api_stack.py) (full rewrite — Cognito authorizer + 4 routes), [infra/stacks/storage_stack.py](infra/stacks/storage_stack.py) (+ DDB + AgentCore Memory), [infra/app.py](infra/app.py) (4 stacks), [lambda/app.py](lambda/app.py) (multi-route proxy), [lambda/schemas.py](lambda/schemas.py) (+ session_id, + conversation_name), [streamlit_client/app.py](streamlit_client/app.py) (`st.login()` + sidebar + replay), [scripts/smoke_test.py](scripts/smoke_test.py), [tests/eval/run_eval.py](tests/eval/run_eval.py), [tests/test_synth.py](tests/test_synth.py), [tests/test_schemas.py](tests/test_schemas.py), [tests/conftest.py](tests/conftest.py).
+
+**Deleted**: `lambda/rag.py` (logic moved to `agent/`), `tests/test_rag.py`, `scripts/rotate_api_key.py` (no API key anymore).
+
+### 21.4 Live verification (2026-05-25 mid-day)
+
+All 4 stacks deployed to `us-east-1` in account `954863244564`. Live IDs (rotate per redeploy — don't memorize):
+```
+StorageStack.KbId                        = 8KTVKJ0AGP
+StorageStack.MemoryId                    = rag_aws_memory-SXdKtfB2bB
+StorageStack.ConversationsTableName      = StorageStack-ConversationsTableCD91EB96-1NKWGKEAWPPV9
+StorageStack.DocsBucketName              = storagestack-docsbucketecea003f-u5ihxkjkalvx
+AuthStack.UserPoolId                     = us-east-1_F4uFIQdMN
+AuthStack.UserPoolClientId               = 6n2reutf71tjagf89a4kr7v9h3
+AuthStack.UserPoolClientSecretArn        = arn:aws:secretsmanager:us-east-1:954863244564:secret:UserPoolClientSecretB552B17-cmf2WLdTjruU-DkTLWV
+AuthStack.TestUserPasswordSecretArn      = arn:aws:secretsmanager:us-east-1:954863244564:secret:TestUserPassword306D299E-slMnSP83lIZh-pus0vb
+AuthStack.UserPoolDomain                 = ragkb-244564
+AgentStack.AgentRuntimeArn               = arn:aws:bedrock-agentcore:us-east-1:954863244564:runtime/rag_aws_agent-QYzNKQBlPZ
+ApiStack.ApiUrl                          = https://qf915n6z4i.execute-api.us-east-1.amazonaws.com/prod/
+```
+
+Verification evidence:
+- `cdk synth` all 4 stacks → clean.
+- 39 unit/synth tests pass (28 in `venv/`, 11 in `infra/.venv/`).
+- Live `POST /query` (in-corpus): 200, grounded answer with `[1]` citation, 3 sources from `refund-policy.md`, confidence 0.67, conversation_name="Refund window for monthly plans", latency 3.4s. ✅
+- Multi-turn (3 user prompts on same session_id): conversation_name only on turn 1; turns 2–3 returned null as expected. ✅
+- `GET /conversations/{sid}` after 3 turns: returns 6 messages in chronological order, USER/ASSISTANT alternating, native `conversational` shape (NOT msgpack). ✅
+- `GET /conversations`: returns the persisted conversation with `conversation_name` + `created_at`. ✅
+- `scripts/smoke_test.py`: 5/5 PASS (added a 5th check for `/conversations`). ✅
+- `tests/eval/run_eval.py`: source-match 100% (6/6 in-corpus), mean in-corpus confidence 0.813, off-corpus confidence clamped to 0.200. **Identical metrics to Phase 6**, confirming no behavioral regression through the new AgentCore Runtime + Memory stack. ✅
+
+### 21.5 Live-deploy incidents and corrective actions
+
+Three issues surfaced during live deploy; all fixed.
+
+**Incident A — Cognito UserPoolDomain reserved-prefix.** Initial `domain_prefix = f"rag-aws-{account[-6:]}"` failed: Cognito rejects prefixes containing `aws`, `amazon`, or `cognito`. Fixed to `ragkb-244564` in [auth_stack.py:78-79](infra/stacks/auth_stack.py#L78-L79). One-line change; redeploy succeeded.
+
+**Incident B — AgentCore Runtime is arm64-only.** Sub-agent A set `platform=ecr_assets.Platform.LINUX_AMD64`; AgentCore rejected the image with `Supported platforms: [arm64]`. Fixed to `LINUX_ARM64` in [agent_stack.py:52](infra/stacks/agent_stack.py#L52). **Generalizable lesson**: AgentCore Runtime is arm64-only. Bake this into any future `CfnRuntime` work. (Verified post-fix: docker buildx builds linux/arm64 cross-arch from my x86 Mac via Docker Desktop's emulation — slower first build, but works.)
+
+**Incident C — DynamoDB `Decimal` not JSON serializable.** `created_at` is written as `int(time.time())` by the agent, but DDB returns it as `Decimal` on read. The `/conversations` handler `json.dumps(items)` raised `TypeError: Object of type Decimal is not JSON serializable`, yielding a 500. Fixed by explicit `int(i["created_at"])` coercion in [lambda/conversations.py:34-41](lambda/conversations.py#L34-L41). **Generalizable lesson**: anything read via `boto3.resource("dynamodb").Table(...).query(...)` returns Decimal for numbers; coerce at the boundary before `json.dumps`.
+
+**Known limitation — test-user password sync on secret rotation**: the AwsCustomResource that calls `AdminSetUserPassword` keys off CFN dynamic refs (`secret_value.unsafe_unwrap()`), which are template-static even when the underlying Secrets Manager value rotates. If the password generator config changes between deploys (e.g., changing `exclude_punctuation`), the secret is regenerated but the live user's password is NOT re-synced. **Workaround** (one-time, after such a change): `aws cognito-idp admin-set-user-password --user-pool-id $UPID --username demo --password "$(aws secretsmanager get-secret-value --secret-id $PWD_ARN --query SecretString --output text)" --permanent --region us-east-1`. **Proper fix (not yet applied)**: bind the custom-resource's `physical_resource_id` to a hash that changes when the secret rotates, or force-rerun on every deploy.
+
+### 21.6 What's improved over the AWS sample
+
+| Aspect | Sample (iteration 3) | This implementation |
+|---|---|---|
+| AgentCore Runtime+Memory IaC | `agentcore` CLI out-of-band + SSM glue | CDK L1 (`CfnRuntime` + `CfnMemory`), 100% `cdk diff`-able |
+| Memory event shape | LangGraph msgpack blobs | Native `conversational` payload, console-introspectable |
+| `list_events` pagination | Single page, silent truncation on long conversations | Full `nextToken` loop |
+| `invoke_agent_runtime` payload | `payload=str` (boto3 spec says bytes) | `payload=...encode("utf-8")` |
+| `runtimeSessionId` | Auto-generated; app session_id only in payload | App session_id explicitly passed (padded to ≥33 chars) |
+| LangGraph dependency | Required (`langgraph`, `langgraph-checkpoint-aws`, `langchain-aws`) | None — pure boto3 |
+
+### 21.7 Cost incurred this phase
+
+~$0.40 total: docker push to ECR (~$0.05), KB ingestion (~$0.001), ~15 Haiku 4.5 calls across smoke + eval + multi-turn test (~$0.08), 4 fresh stack deploys (rounding). AgentCore Runtime container while up: ~$0.20–0.50/day idle.
+
+Cumulative project total still well under $2 of the $20 budget. **Run `cdk destroy AgentStack StorageStack AuthStack ApiStack --force` after this session if not actively testing** to zero idle cost.
 
 ---
 

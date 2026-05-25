@@ -10,9 +10,9 @@ import json
 import statistics
 import sys
 import time
+import uuid
 from pathlib import Path
 
-import boto3
 import requests
 from botocore.exceptions import ClientError
 
@@ -22,7 +22,12 @@ EVAL_DIR = Path(__file__).resolve().parent
 QUESTIONS_PATH = EVAL_DIR / "questions.json"
 RESULTS_PATH = EVAL_DIR / "eval_results.md"
 
-POLITE_DELAY_S = 0.25  # UsagePlan rate is 5 req/s; stay well under.
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from get_id_token import get_id_token, _fetch_password  # noqa: E402
+
+POLITE_DELAY_S = 0.25
 TOP_K = 5
 ANSWER_TRUNCATE = 120
 
@@ -36,18 +41,12 @@ def _load_outputs() -> dict:
         return {}
 
 
-def _default_api_url() -> str | None:
-    return _load_outputs().get("ApiStack", {}).get("ApiUrl")
-
-
-def _default_secret_arn() -> str | None:
-    return _load_outputs().get("StorageStack", {}).get("ApiKeySecretArn")
-
-
-def _fetch_api_key(secret_arn: str, region: str) -> str:
-    sm = boto3.client("secretsmanager", region_name=region)
-    raw = sm.get_secret_value(SecretId=secret_arn)["SecretString"]
-    return json.loads(raw)["apiKey"]
+def _api_outputs() -> dict:
+    outs = _load_outputs()
+    merged = {}
+    for stack in ("ApiStack", "AuthStack"):
+        merged.update(outs.get(stack, {}))
+    return merged
 
 
 def _truncate(s: str, n: int = ANSWER_TRUNCATE) -> str:
@@ -55,14 +54,18 @@ def _truncate(s: str, n: int = ANSWER_TRUNCATE) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
-def _ask(base: str, api_key: str, question: str) -> tuple[dict | None, int, int]:
+def _ask(base: str, token: str, question: str) -> tuple[dict | None, int, int]:
     """Return (body, status, latency_ms)."""
     t0 = time.perf_counter()
     try:
         r = requests.post(
             f"{base}/query",
-            headers={"x-api-key": api_key, "Content-Type": "application/json"},
-            json={"question": question, "top_k": TOP_K},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "question": question,
+                "session_id": "s-" + uuid.uuid4().hex,
+                "top_k": TOP_K,
+            },
             timeout=30,
         )
     except requests.RequestException as e:
@@ -76,31 +79,47 @@ def _ask(base: str, api_key: str, question: str) -> tuple[dict | None, int, int]
 
 
 def main() -> int:
+    outs = _api_outputs()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--api-url", default=_default_api_url())
-    p.add_argument("--secret-arn", default=_default_secret_arn())
+    p.add_argument("--api-url", default=outs.get("ApiUrl"))
+    p.add_argument("--user-pool-id", default=outs.get("UserPoolId"))
+    p.add_argument("--client-id", default=outs.get("UserPoolClientId"))
+    p.add_argument("--username", default=outs.get("TestUserName"))
+    p.add_argument("--password-secret-arn", default=outs.get("TestUserPasswordSecretArn"))
+    p.add_argument("--client-secret-arn", default=outs.get("UserPoolClientSecretArn"))
     p.add_argument("--region", default="us-east-1")
     p.add_argument("--questions", default=str(QUESTIONS_PATH))
     p.add_argument("--output", default=str(RESULTS_PATH))
     args = p.parse_args()
 
-    if not args.api_url or not args.secret_arn:
-        print("ERROR: --api-url and --secret-arn required (cdk-outputs.json missing)", file=sys.stderr)
+    required = ["api_url", "user_pool_id", "client_id", "username", "password_secret_arn"]
+    missing = [k for k in required if getattr(args, k) is None]
+    if missing:
+        print(f"ERROR: missing required values: {missing}", file=sys.stderr)
         return 2
 
     base = args.api_url.rstrip("/")
     questions = json.loads(Path(args.questions).read_text())
 
     try:
-        api_key = _fetch_api_key(args.secret_arn, args.region)
+        password = _fetch_password(args.password_secret_arn, args.region)
+        client_secret = (
+            _fetch_password(args.client_secret_arn, args.region)
+            if getattr(args, "client_secret_arn", None)
+            else None
+        )
+        token = get_id_token(
+            args.user_pool_id, args.client_id, args.username, password,
+            args.region, client_secret,
+        )
     except ClientError as e:
-        print(f"ERROR: failed to fetch API key: {e}", file=sys.stderr)
+        print(f"ERROR: failed to fetch ID token: {e}", file=sys.stderr)
         return 2
 
     rows: list[dict] = []
     wall_start = time.perf_counter()
     for i, q in enumerate(questions):
-        body, status, latency = _ask(base, api_key, q["question"])
+        body, status, latency = _ask(base, token, q["question"])
         sources = (body or {}).get("sources") or []
         top = sources[0] if sources else {}
         actual_top = top.get("document") or "(none)"
