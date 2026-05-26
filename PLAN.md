@@ -1,6 +1,6 @@
 # RAG-AWS Productionization — Implementation Plan
 
-> This is the canonical implementation plan, current as of 2026-05-25 (Phase 12 — production-like deploy).
+> This is the canonical implementation plan, current as of 2026-05-26 (Phase 13 — UI redesign + sources-on-reload persistence).
 > For the phase-by-phase build log + live AWS resource IDs, see [SESSION_HANDOFF.md](SESSION_HANDOFF.md).
 > For the reviewer-facing overview, see [README.md](README.md).
 
@@ -284,6 +284,7 @@ Each phase ran as a tight, self-contained brief sent to a `general-purpose` sub-
 | 10 | `scripts/run_streamlit.sh` developer-loop polish (auto-syncs `secrets.toml` from live CFN + Secrets Manager) | ✅ |
 | 11 | Consistency review + Lambda-backed test-user password sync (closed the `AwsCustomResource` + `unsafe_unwrap()` trap) | ✅ + live-redeployed |
 | 12 | Production-like deploy: APIGW method throttling + multi-origin CORS + Cognito callbacks for Streamlit Community Cloud at `rag-aws-kb.streamlit.app` | ✅ + live-deployed |
+| 13 | UI redesign (ChatGPT-style sidebar with time-buckets + active highlight, theme.toml auto light/dark, header Settings popover + Upload dialog, Acme removed from UI strings) + per-turn `sources`/`confidence`/`latency_ms`/`model_id` persistence via base64-encoded AgentCore Memory `blob` sidecar so reloaded conversations render the full assistant payload | ✅ + live-redeployed |
 
 ## Sample documents
 

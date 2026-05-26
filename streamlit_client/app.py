@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import time
 import uuid
@@ -10,10 +11,14 @@ import streamlit as st
 
 REQUEST_TIMEOUT_S = 30
 TOKEN_REFRESH_LEEWAY_S = 60
+APP_NAME = "Knowledge Base"
 
-st.set_page_config(page_title="Acme Notes RAG", page_icon=":speech_balloon:")
-st.title("Acme Notes — Knowledge Base")
-st.caption("Ask a question; answers are grounded in the ingested sample docs.")
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon=":books:",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
 try:
     API_BASE_URL = st.secrets["api"]["api_base_url"].rstrip("/")
@@ -22,19 +27,108 @@ except (KeyError, FileNotFoundError):
     st.stop()
 
 # Phase 9a — streaming Lambda Function URL. Optional (the toggle hides gracefully
-# if absent), but required to use the "Stream responses" checkbox below.
+# if absent), but required to use the "Stream responses" checkbox.
 try:
     STREAM_URL = st.secrets["stream"]["stream_url"].rstrip("/")
 except (KeyError, FileNotFoundError):
     STREAM_URL = ""
 
 
+# ---------------------------------------------------------------------------
+# CSS — one injection block. Targets only documented stable selectors
+# (data-testid="stSidebar" / stChatInput / stButton), no internal emotion
+# class names. See SESSION_HANDOFF.md research note for the rationale.
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    /* Tighten chat-input radius + subtle border */
+    [data-testid="stChatInput"] {
+        border-radius: 14px;
+    }
+
+    /* Sidebar: turn each st.button into a flush, hoverable list item.
+       This is what gives the ChatGPT-style conversation list its feel. */
+    section[data-testid="stSidebar"] [data-testid="stButton"] > button {
+        background: transparent;
+        border: 1px solid transparent;
+        text-align: left;
+        justify-content: flex-start;
+        padding: 0.4rem 0.65rem;
+        font-weight: 400;
+        font-size: 0.875rem;
+        line-height: 1.25rem;
+        width: 100%;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: background-color 120ms ease;
+    }
+    section[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
+        background: rgba(0, 0, 0, 0.05);
+        border-color: transparent;
+    }
+    section[data-testid="stSidebar"] [data-testid="stButton"] > button:focus:not(:active) {
+        box-shadow: none;
+        border-color: transparent;
+    }
+    /* Active conversation: subtle accent tint, NOT a saturated primary fill */
+    section[data-testid="stSidebar"] [data-testid="stButton"] > button[kind="primary"] {
+        background: rgba(16, 163, 127, 0.12);
+        color: inherit;
+        border: 1px solid rgba(16, 163, 127, 0.25);
+        font-weight: 500;
+    }
+    section[data-testid="stSidebar"] [data-testid="stButton"] > button[kind="primary"]:hover {
+        background: rgba(16, 163, 127, 0.18);
+    }
+
+    /* Dark-mode tweaks for sidebar hover */
+    @media (prefers-color-scheme: dark) {
+        section[data-testid="stSidebar"] [data-testid="stButton"] > button:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+    }
+
+    /* Time-bucket caption: smaller + muted */
+    section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        opacity: 0.55;
+        margin-top: 0.75rem;
+        margin-bottom: 0.1rem;
+        padding-left: 0.5rem;
+    }
+
+    /* Header action row: align trailing buttons cleanly */
+    .header-actions [data-testid="stButton"] > button {
+        font-size: 0.85rem;
+        padding: 0.3rem 0.7rem;
+    }
+
+    /* Reduce vertical gap inside the sidebar so the list reads denser */
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.25rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
 if not st.user.is_logged_in:
+    st.title(APP_NAME)
+    st.caption("Grounded answers from your ingested documents.")
     st.info("Sign in with your Cognito account to continue.")
-    st.button("Log in with Cognito", on_click=st.login)
+    st.button("Log in with Cognito", on_click=st.login, type="primary")
     st.stop()
 
 
+# ---------------------------------------------------------------------------
+# Auth / token helpers (unchanged from pre-redesign).
+# ---------------------------------------------------------------------------
 def _jwt_exp(token: str) -> int:
     payload_b64 = token.split(".")[1]
     payload_b64 += "=" * (-len(payload_b64) % 4)
@@ -109,7 +203,10 @@ def _list_conversations() -> list[dict]:
         data = r.json()
     except ValueError:
         return []
-    return data if isinstance(data, list) else data.get("conversations", []) or []
+    items = data if isinstance(data, list) else data.get("conversations", []) or []
+    # Sort most-recent-first for the sidebar list.
+    items.sort(key=lambda c: int(c.get("created_at", 0) or 0), reverse=True)
+    return items
 
 
 def _load_conversation(session_id: str) -> list[dict]:
@@ -134,15 +231,33 @@ def _load_conversation(session_id: str) -> list[dict]:
     return data.get("messages", []) if isinstance(data, dict) else []
 
 
+def _bucket_label(created_at: int) -> str:
+    """Group a conversation's creation date into a ChatGPT-style time bucket."""
+    if not created_at:
+        return "Older"
+    try:
+        created = datetime.datetime.fromtimestamp(int(created_at))
+    except (OSError, ValueError, OverflowError):
+        return "Older"
+    delta_days = (datetime.datetime.now().date() - created.date()).days
+    if delta_days <= 0:
+        return "Today"
+    if delta_days == 1:
+        return "Yesterday"
+    if delta_days <= 7:
+        return "Previous 7 days"
+    if delta_days <= 30:
+        return "Previous 30 days"
+    return "Older"
+
+
+_BUCKET_ORDER = ("Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older")
+
+
 # ---------------------------------------------------------------------------
-# Phase 9a — streaming SSE consumer
+# Streaming SSE consumer (Phase 9a — unchanged behavior).
 # ---------------------------------------------------------------------------
 def _iter_sse_events(resp):
-    """Yield (event_name, data_dict) tuples from a streaming requests.Response.
-
-    Parses the standard SSE wire format: lines of "event: NAME" + "data: JSON"
-    separated by blank lines.
-    """
     event_name = "message"
     data_lines: list[str] = []
     for raw_line in resp.iter_lines(decode_unicode=True):
@@ -161,7 +276,6 @@ def _iter_sse_events(resp):
             data_lines = []
             continue
         if line.startswith(":"):
-            # SSE comment / keepalive
             continue
         if line.startswith("event:"):
             event_name = line[len("event:"):].strip()
@@ -170,11 +284,6 @@ def _iter_sse_events(resp):
 
 
 def _stream_query(question: str, session_id: str, k: int, placeholder):
-    """POST to the streaming Function URL and incrementally render tokens.
-
-    Returns (final_payload_dict_or_None, error_message_or_None) so the caller
-    can append the right entry to st.session_state.messages.
-    """
     if not STREAM_URL:
         return None, "Streaming is enabled but [stream].stream_url is not set in secrets.toml."
 
@@ -206,7 +315,6 @@ def _stream_query(question: str, session_id: str, k: int, placeholder):
 
     for event_name, data in _iter_sse_events(resp):
         if event_name == "meta":
-            # not user-visible
             continue
         if event_name == "token":
             accumulated_text += data.get("text", "")
@@ -223,13 +331,8 @@ def _stream_query(question: str, session_id: str, k: int, placeholder):
     if error_payload:
         return None, f"Stream error: {error_payload.get('message', 'unknown')}"
 
-    # If the model emitted INSUFFICIENT_CONTEXT the streaming Lambda
-    # appended the canned answer to the token stream and clamps confidence
-    # <=0.2 in the `done` event. Honour that: strip the marker prefix from
-    # the visible text so the user only sees the canned answer.
     INSUFFICIENT_MARKER = "INSUFFICIENT_CONTEXT"
     if accumulated_text.strip().startswith(INSUFFICIENT_MARKER):
-        # The Lambda appends "\n\n" + canned to the original stream.
         if "\n\n" in accumulated_text:
             accumulated_text = accumulated_text.split("\n\n", 1)[1]
         else:
@@ -270,183 +373,245 @@ def _post_query(question: str, session_id: str, k: int) -> tuple[int, dict | Non
     return r.status_code, body, None
 
 
+# ---------------------------------------------------------------------------
+# Session state init
+# ---------------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "session_id" not in st.session_state:
     st.session_state.session_id = _new_session_id()
 if "conversations" not in st.session_state:
     st.session_state.conversations = _list_conversations()
+if "top_k" not in st.session_state:
+    st.session_state.top_k = 5
+if "use_stream" not in st.session_state:
+    st.session_state.use_stream = bool(STREAM_URL)
 
 
-with st.sidebar:
-    st.markdown(f"**{st.user.email}**")
-    st.button("Log out", on_click=st.logout, key="sidebar_logout")
-    st.divider()
+# ---------------------------------------------------------------------------
+# Upload dialog (Phase 9b flow, now isolated from the sidebar).
+# ---------------------------------------------------------------------------
+_ALLOWED_EXTS = ["txt", "md", "html", "htm", "pdf", "doc", "docx", "csv", "xls", "xlsx"]
+_EXT_TO_MIME = {
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "html": "text/html",
+    "htm": "text/html",
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "csv": "text/csv",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 
-    top_k = st.slider("top_k", min_value=1, max_value=10, value=5)
 
-    # Phase 9a — streaming toggle. Default ON when a stream_url is configured.
-    stream_default = bool(STREAM_URL)
-    use_stream = st.checkbox(
-        "Stream responses",
-        value=stream_default,
-        help="Use the Lambda Function URL + SSE path (faster TTFB). "
-             "When off, the buffered REST /query path is used.",
-        disabled=not STREAM_URL,
-    )
-    if not STREAM_URL:
-        st.caption("Set `[stream].stream_url` in secrets.toml to enable streaming.")
-
-    if st.button("+ New conversation"):
-        st.session_state.session_id = _new_session_id()
-        st.session_state.messages = []
-        st.rerun()
-
-    # -----------------------------------------------------------------------
-    # Phase 9b — upload + ingestion
-    # -----------------------------------------------------------------------
-    st.divider()
-    st.subheader("Upload document")
+@st.dialog("Upload a document")
+def _upload_dialog():
     st.caption(
-        "Upload a single file (max 50 MB). It will be ingested into the "
-        "knowledge base, then queryable through chat."
+        "Upload one file (max 50 MB). It will be ingested into the knowledge "
+        "base and become queryable immediately."
     )
-    # Whitelist mirrors lambda/uploads.py ALLOWED_EXTENSIONS.
-    _ALLOWED_EXTS = ["txt", "md", "html", "htm", "pdf", "doc", "docx", "csv", "xls", "xlsx"]
-    _EXT_TO_MIME = {
-        "txt": "text/plain",
-        "md": "text/markdown",
-        "html": "text/html",
-        "htm": "text/html",
-        "pdf": "application/pdf",
-        "doc": "application/msword",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "csv": "text/csv",
-        "xls": "application/vnd.ms-excel",
-        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    }
     uploaded = st.file_uploader(
         "Choose a file",
         type=_ALLOWED_EXTS,
         accept_multiple_files=False,
         key="upload_widget",
     )
-    if uploaded is not None and st.button("Ingest into knowledge base", key="ingest_btn"):
-        size_mb = len(uploaded.getvalue()) / (1024 * 1024)
-        if size_mb > 50:
-            st.error(f"File too large ({size_mb:.1f} MB). Limit is 50 MB.")
-        else:
-            ext = uploaded.name.rsplit(".", 1)[-1].lower()
-            content_type = _EXT_TO_MIME.get(ext, "application/octet-stream")
-            with st.status("Uploading and ingesting…", expanded=True) as status:
-                try:
-                    # 1. Mint URL.
-                    status.write("Minting upload URL…")
-                    r = requests.post(
-                        f"{API_BASE_URL}/documents",
-                        headers=_auth_headers(),
-                        json={"filename": uploaded.name, "content_type": content_type},
-                        timeout=REQUEST_TIMEOUT_S,
-                    )
-                    if r.status_code in (401, 403):
-                        _handle_unauthorized()
-                    r.raise_for_status()
-                    mint = r.json()
+    if uploaded is None:
+        return
+    size_mb = len(uploaded.getvalue()) / (1024 * 1024)
+    st.caption(f"`{uploaded.name}` — {size_mb:.2f} MB")
+    if not st.button("Ingest into knowledge base", key="ingest_btn", type="primary"):
+        return
+    if size_mb > 50:
+        st.error(f"File too large ({size_mb:.1f} MB). Limit is 50 MB.")
+        return
+    ext = uploaded.name.rsplit(".", 1)[-1].lower()
+    content_type = _EXT_TO_MIME.get(ext, "application/octet-stream")
+    with st.status("Uploading and ingesting…", expanded=True) as status:
+        try:
+            status.write("Minting upload URL…")
+            r = requests.post(
+                f"{API_BASE_URL}/documents",
+                headers=_auth_headers(),
+                json={"filename": uploaded.name, "content_type": content_type},
+                timeout=REQUEST_TIMEOUT_S,
+            )
+            if r.status_code in (401, 403):
+                _handle_unauthorized()
+            r.raise_for_status()
+            mint = r.json()
 
-                    # 2. PUT to S3 with the matching Content-Type.
-                    status.write(f"Uploading {size_mb:.2f} MB to S3…")
-                    put = requests.put(
-                        mint["upload_url"],
-                        data=uploaded.getvalue(),
-                        headers={"Content-Type": content_type},
-                        timeout=120,
-                    )
-                    put.raise_for_status()
+            status.write(f"Uploading {size_mb:.2f} MB to S3…")
+            put = requests.put(
+                mint["upload_url"],
+                data=uploaded.getvalue(),
+                headers={"Content-Type": content_type},
+                timeout=120,
+            )
+            put.raise_for_status()
 
-                    # 3. Start ingestion.
-                    status.write("Starting ingestion job…")
-                    r = requests.post(
-                        f"{API_BASE_URL}/ingest",
-                        headers=_auth_headers(),
-                        json={"key": mint["key"]},
-                        timeout=REQUEST_TIMEOUT_S,
-                    )
-                    if r.status_code in (401, 403):
-                        _handle_unauthorized()
-                    r.raise_for_status()
-                    job_id = r.json()["job_id"]
-                    status.write(f"Job started: `{job_id}`")
+            status.write("Starting ingestion job…")
+            r = requests.post(
+                f"{API_BASE_URL}/ingest",
+                headers=_auth_headers(),
+                json={"key": mint["key"]},
+                timeout=REQUEST_TIMEOUT_S,
+            )
+            if r.status_code in (401, 403):
+                _handle_unauthorized()
+            r.raise_for_status()
+            job_id = r.json()["job_id"]
+            status.write(f"Job started: `{job_id}`")
 
-                    # 4. Poll every 2s up to 90s.
-                    deadline = time.monotonic() + 90.0
-                    last_status = "STARTING"
-                    last_body: dict = {}
-                    while time.monotonic() < deadline:
-                        time.sleep(2.0)
-                        r = requests.get(
-                            f"{API_BASE_URL}/ingest/{job_id}",
-                            headers=_auth_headers(),
-                            timeout=REQUEST_TIMEOUT_S,
-                        )
-                        if r.status_code in (401, 403):
-                            _handle_unauthorized()
-                        if r.status_code != 200:
-                            status.update(label="Polling failed", state="error")
-                            st.error(f"GET /ingest/{job_id} -> {r.status_code}")
-                            break
-                        last_body = r.json()
-                        last_status = last_body.get("status", "UNKNOWN")
-                        status.write(f"Status: `{last_status}`")
-                        if last_status in ("COMPLETE", "FAILED", "STOPPED"):
-                            break
+            deadline = time.monotonic() + 90.0
+            last_status = "STARTING"
+            last_body: dict = {}
+            while time.monotonic() < deadline:
+                time.sleep(2.0)
+                r = requests.get(
+                    f"{API_BASE_URL}/ingest/{job_id}",
+                    headers=_auth_headers(),
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+                if r.status_code in (401, 403):
+                    _handle_unauthorized()
+                if r.status_code != 200:
+                    status.update(label="Polling failed", state="error")
+                    st.error(f"GET /ingest/{job_id} -> {r.status_code}")
+                    break
+                last_body = r.json()
+                last_status = last_body.get("status", "UNKNOWN")
+                status.write(f"Status: `{last_status}`")
+                if last_status in ("COMPLETE", "FAILED", "STOPPED"):
+                    break
 
-                    if last_status == "COMPLETE":
-                        stats = last_body.get("statistics", {})
-                        status.update(label="Ingestion complete", state="complete")
-                        st.success(
-                            f"Indexed {stats.get('indexed', 0)} / "
-                            f"{stats.get('scanned', 0)} document(s); "
-                            f"failed {stats.get('failed', 0)}."
-                        )
-                        # Refresh conversations (harmless side-effect; the new
-                        # doc is immediately queryable via /query and /query-stream).
-                        st.session_state.conversations = _list_conversations()
-                    elif last_status in ("FAILED", "STOPPED"):
-                        status.update(label=f"Ingestion {last_status}", state="error")
-                        reasons = last_body.get("failure_reasons") or []
-                        st.error(
-                            f"Ingestion {last_status}. "
-                            + ("Reasons: " + "; ".join(reasons) if reasons else "")
-                        )
-                    else:
-                        status.update(label="Timed out", state="error")
-                        st.warning(
-                            f"Did not reach COMPLETE within 90s. Last status: {last_status}."
-                            f" Job id: {job_id}."
-                        )
-                except requests.HTTPError as e:
-                    status.update(label="Failed", state="error")
-                    body_text = ""
-                    if e.response is not None:
-                        body_text = e.response.text[:300]
-                    st.error(f"HTTP error: {e} {body_text}")
-                except requests.RequestException as e:
-                    status.update(label="Network error", state="error")
-                    st.error(f"Network error: {e}")
+            if last_status == "COMPLETE":
+                stats = last_body.get("statistics", {})
+                status.update(label="Ingestion complete", state="complete")
+                st.success(
+                    f"Indexed {stats.get('indexed', 0)} / "
+                    f"{stats.get('scanned', 0)} document(s); "
+                    f"failed {stats.get('failed', 0)}."
+                )
+                st.session_state.conversations = _list_conversations()
+            elif last_status in ("FAILED", "STOPPED"):
+                status.update(label=f"Ingestion {last_status}", state="error")
+                reasons = last_body.get("failure_reasons") or []
+                st.error(
+                    f"Ingestion {last_status}. "
+                    + ("Reasons: " + "; ".join(reasons) if reasons else "")
+                )
+            else:
+                status.update(label="Timed out", state="error")
+                st.warning(
+                    f"Did not reach COMPLETE within 90s. Last status: {last_status}."
+                    f" Job id: {job_id}."
+                )
+        except requests.HTTPError as e:
+            status.update(label="Failed", state="error")
+            body_text = e.response.text[:300] if e.response is not None else ""
+            st.error(f"HTTP error: {e} {body_text}")
+        except requests.RequestException as e:
+            status.update(label="Network error", state="error")
+            st.error(f"Network error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Header: title + right-aligned action row (Settings popover + Upload button)
+# ---------------------------------------------------------------------------
+header_left, header_right = st.columns([0.62, 0.38])
+with header_left:
+    st.title(APP_NAME)
+    st.caption("Grounded answers from your ingested documents.")
+with header_right:
+    st.markdown('<div class="header-actions">', unsafe_allow_html=True)
+    spacer, settings_col, upload_col = st.columns([0.1, 0.45, 0.45])
+    with settings_col:
+        with st.popover("⚙ Settings", use_container_width=True):
+            st.session_state.top_k = st.slider(
+                "Sources to retrieve (top_k)",
+                min_value=1,
+                max_value=10,
+                value=int(st.session_state.top_k),
+                help="How many KB chunks to retrieve and consider as evidence.",
+            )
+            if STREAM_URL:
+                st.session_state.use_stream = st.checkbox(
+                    "Stream responses",
+                    value=bool(st.session_state.use_stream),
+                    help="Token-by-token streaming via Lambda Function URL + SSE.",
+                )
+            else:
+                st.session_state.use_stream = False
+                st.caption("Set `[stream].stream_url` in secrets.toml to enable streaming.")
+    with upload_col:
+        if st.button("⬆ Upload", use_container_width=True):
+            _upload_dialog()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Sidebar: conversations-only + user identity at the bottom.
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    if st.button("＋ New conversation", use_container_width=True, type="primary"):
+        st.session_state.session_id = _new_session_id()
+        st.session_state.messages = []
+        st.rerun()
+
+    convs = st.session_state.conversations
+    if not convs:
+        st.caption("No past conversations yet.")
+    else:
+        # Group by bucket while preserving most-recent-first order.
+        grouped: dict[str, list[dict]] = {}
+        for conv in convs:
+            bucket = _bucket_label(int(conv.get("created_at", 0) or 0))
+            grouped.setdefault(bucket, []).append(conv)
+        active_sid = st.session_state.session_id
+        for bucket in _BUCKET_ORDER:
+            if bucket not in grouped:
+                continue
+            st.caption(bucket)
+            for conv in grouped[bucket]:
+                sid = conv.get("session_id") or conv.get("id") or ""
+                if not sid:
+                    continue
+                label = (
+                    conv.get("conversation_name")
+                    or conv.get("title")
+                    or conv.get("preview")
+                    or "Untitled"
+                )
+                btn_type = "primary" if sid == active_sid else "secondary"
+                if st.button(
+                    label,
+                    key=f"conv-{sid}",
+                    use_container_width=True,
+                    type=btn_type,
+                ):
+                    st.session_state.session_id = sid
+                    st.session_state.messages = _load_conversation(sid)
+                    st.rerun()
 
     st.divider()
-    st.subheader("Past conversations")
-    for conv in st.session_state.conversations:
-        sid = conv.get("session_id") or conv.get("id") or ""
-        if not sid:
-            continue
-        label = conv.get("conversation_name") or conv.get("title") or conv.get("preview") or sid
-        if st.button(label, key=f"conv-{sid}"):
-            st.session_state.session_id = sid
-            st.session_state.messages = _load_conversation(sid)
-            st.rerun()
+
+    # User identity / logout. Popover keeps the surface compact like ChatGPT's
+    # bottom-left avatar menu.
+    with st.popover(f"👤  {st.user.email}", use_container_width=True):
+        st.caption("Signed in as")
+        st.markdown(f"**{st.user.email}**")
+        st.divider()
+        st.button("Log out", on_click=st.logout, key="sidebar_logout", use_container_width=True)
 
 
+# ---------------------------------------------------------------------------
+# Chat history replay
+# ---------------------------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant" and msg.get("payload"):
@@ -454,16 +619,17 @@ for msg in st.session_state.messages:
         else:
             st.markdown(msg["content"])
 
-prompt = st.chat_input("Ask a question about Acme Notes…")
+prompt = st.chat_input("Ask a question about your documents…")
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    top_k = int(st.session_state.top_k)
+    use_stream = bool(st.session_state.use_stream) and bool(STREAM_URL)
+
     with st.chat_message("assistant"):
-        if use_stream and STREAM_URL:
-            # Streaming path: render tokens into a placeholder as they arrive,
-            # then render confidence + sources after the `done` event.
+        if use_stream:
             placeholder = st.empty()
             payload, err = _stream_query(
                 prompt, st.session_state.session_id, top_k, placeholder
@@ -487,10 +653,13 @@ if prompt:
                             st.write(s.get("snippet", ""))
                             if i < len(sources):
                                 st.divider()
+                was_first_turn = len(st.session_state.messages) <= 1
                 st.session_state.messages.append(
                     {"role": "assistant", "content": payload.get("answer", ""), "payload": payload}
                 )
                 st.session_state.conversations = _list_conversations()
+                if was_first_turn:
+                    st.rerun()
         else:
             with st.spinner("Querying knowledge base…"):
                 status, body, net_err = _post_query(
@@ -503,10 +672,13 @@ if prompt:
                 _handle_unauthorized()
             elif status == 200 and isinstance(body, dict):
                 _render_assistant(body)
+                was_first_turn = len(st.session_state.messages) <= 1
                 st.session_state.messages.append(
                     {"role": "assistant", "content": body.get("answer", ""), "payload": body}
                 )
                 st.session_state.conversations = _list_conversations()
+                if was_first_turn:
+                    st.rerun()
             else:
                 msg = (body or {}).get("message", "Unknown error")
                 err_label = (body or {}).get("error", "Error")

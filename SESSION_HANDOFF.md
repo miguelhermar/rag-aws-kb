@@ -2,7 +2,9 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-25 (evening), after **Phase 12 — production-like deploy** (verified live): the 4 CDK stacks were updated in place to add APIGW per-method throttling + multi-origin CORS + Cognito callback URLs for **Streamlit Community Cloud**. The Streamlit client is now publicly reachable at **https://rag-aws-kb.streamlit.app**, hosted free on Streamlit Cloud (AWS App Runner stopped accepting new customers 2026-04-30; see [[feedback-aws-apprunner-unavailable]]). End-to-end browser walkthrough confirmed by Miguel (login + streaming + non-streaming chat + upload + sidebar conversations). See §25. The local dev loop (`./scripts/run_streamlit.sh` from Phase 10) still works against the same prod stacks. README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 has the local TL;DR, §10.6 has the prod Streamlit Cloud runbook.
+**Last updated**: 2026-05-26 (mid-day), after **Phase 13 — UI redesign + sources-on-reload persistence** (verified live): the Streamlit client got a ChatGPT-style redesign (Acme branding removed, conversations-only sidebar with time-bucket grouping + active highlight, settings popover, upload moved into an `st.dialog`, user-identity popover at the bottom, theme.toml + Inter font with auto light/dark). Two backend changes redeployed AgentStack + ApiStack to persist per-turn `sources` + `confidence` + `latency_ms` + `model_id` to AgentCore Memory as a base64-encoded `blob` sidecar so reloading a past conversation now shows the full assistant payload (not just text). See §26 for the full record, including the discovered AgentCore Memory blob round-trip quirk (Document type comes back as a Java `toString()` repr on `ListEvents` — workaround: base64-in-document-field + regex-extract on read; codified in [[feedback-agentcore-memory-blob-roundtrip]]). README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 has the local TL;DR, §10.6 has the prod Streamlit Cloud runbook.
+
+**Previous milestone**: 2026-05-25 (evening), **Phase 12 — production-like deploy** (verified live): the 4 CDK stacks were updated in place to add APIGW per-method throttling + multi-origin CORS + Cognito callback URLs for **Streamlit Community Cloud**. The Streamlit client is publicly reachable at **https://rag-aws-kb.streamlit.app**, hosted free on Streamlit Cloud (AWS App Runner stopped accepting new customers 2026-04-30; see [[feedback-aws-apprunner-unavailable]]). End-to-end browser walkthrough confirmed by Miguel. See §25. The local dev loop (`./scripts/run_streamlit.sh` from Phase 10) still works against the same prod stacks.
 
 **Important**: the stacks are deployed in account `954863244564` / region `us-east-1` and the system is live at the URL above. If Miguel runs `cdk destroy --all`, every Cognito ID + API URL + App Client secret rotates — the *local* launcher auto-syncs on next run, but the Streamlit Cloud secrets must be re-pasted manually from `scripts/print_streamlit_cloud_secrets.py`. README §10.6 covers the post-redeploy ritual.
 
@@ -883,13 +885,96 @@ The system is now publicly reachable and end-to-end functional at the prod URL. 
 
 ---
 
+## 26. Phase 13 — UI redesign + sources-on-reload persistence (2026-05-26)
+
+Two distinct improvements landed in this session: a substantial Streamlit UI redesign (no infra), plus a backend change (`AgentStack` + `ApiStack` redeployed) so per-turn `sources` + `confidence` + `latency_ms` + `model_id` persist in AgentCore Memory and surface when a past conversation is reloaded. Triggered by Miguel testing the UI and noticing two UX bugs after the redesign was already in place.
+
+### 26.1 Locked decisions (Phase 13)
+
+| Area | Choice | Rationale |
+|---|---|---|
+| UI app name | **"Knowledge Base"** (generic) | Miguel asked to remove all Acme references from the UI. Sample-doc content can keep referencing Acme — only the UI strings changed. |
+| Theme | `[theme.light]` + `[theme.dark]` in `.streamlit/config.toml` (auto-follows OS); Inter font; ChatGPT-green accent `#10A37F` | `base="auto"` is NOT a valid Streamlit 1.56 value — verified via WebFetch. Defining both subsections gives the same effect (Streamlit honors OS preference, user can override in app menu). |
+| Sidebar shape | **Conversations-only**, ChatGPT-style. Time-bucket headers (`Today` / `Yesterday` / `Previous 7 days` / `Previous 30 days` / `Older`) via `st.caption`. Active conversation highlighted by passing `type="primary"` to the matching `st.button` (subtle accent tint via custom CSS, NOT the default saturated primary fill). | User explicitly picked this option over alternatives. |
+| Settings location | `st.popover("⚙ Settings")` in the header — holds `top_k` slider + Stream toggle | Removes them from the cramped sidebar. |
+| Upload location | `@st.dialog("Upload a document")` triggered by header button | Removes ~130 lines of visual noise from the sidebar. Existing upload+ingest poll loop preserved inside the dialog. |
+| User identity | `st.popover` at the bottom of the sidebar; clicking reveals "Log out" | Natural document-flow placement (not flex-pinned to viewport bottom — Miguel picked moderate-CSS scope, not aggressive). |
+| CSS approach | One injection block targeting only documented stable `data-testid` selectors (`stSidebar`, `stChatInput`, `stButton`, `stCaptionContainer`, `stVerticalBlock`); never target internal `.st-emotion-cache-*` classes | Stable across Streamlit minor upgrades. |
+| Sources/confidence persistence | **Base64-encoded JSON in an AgentCore Memory `blob` payload item**, one per ASSISTANT turn | See §26.4 — Document-typed blobs round-trip poorly through `ListEvents`. |
+| Migration | No backfill. Conversations created BEFORE this redeploy still reload as text-only (no blob sidecar). New turns persist sources/confidence going forward. | Acceptable for a demo; backfill would require a separate one-shot script. |
+
+### 26.2 Files (this phase)
+
+**Created**:
+- [streamlit_client/.streamlit/config.toml](streamlit_client/.streamlit/config.toml) — theme + sidebar palette + Inter/JetBrains Mono fonts. Stays gitignored? No — `config.toml` is committed (it's UI config, not secrets); `secrets.toml` is the gitignored one.
+
+**Heavy edits**:
+- [streamlit_client/app.py](streamlit_client/app.py) — full rewrite of layout (header with title + Settings popover + Upload button; conversations-only sidebar with time-buckets and active highlight; user-identity popover at bottom). Replaced all 3 "Acme" references with "Knowledge Base". Added `_bucket_label()` + `_BUCKET_ORDER`. Promoted `top_k` and `use_stream` to `st.session_state` so the popover-controlled values survive reruns. Added `@st.dialog("Upload a document")`. Added `st.rerun()` after the first assistant message on a fresh session so the new conversation pops into the sidebar immediately (Issue 1 — was waiting for the next user action). Preserved all behavior: Cognito auth, JWT refresh, SSE streaming, INSUFFICIENT_CONTEXT marker strip, buffered `/query`, upload+ingest poll loop, conversation replay.
+- [agent/rag.py](agent/rag.py) — `write_memory` now accepts `assistant_meta` and adds a third `{"blob": {"b64": <urlsafe-base64-of-JSON>}}` payload item. Caller in `run_query` passes `{sources, confidence, latency_ms, model_id, retrieval_strategy}`. Moved `latency_ms` calculation BEFORE `write_memory` so the value can be persisted.
+- [lambda_stream/stream_app.py](lambda_stream/stream_app.py) — same change to `_write_memory`. Two call sites (the no-context path + the post-stream path) both pass the sidecar now.
+- [lambda/conversations.py](lambda/conversations.py) — added `_extract_blob_meta()` helper that handles both the dict-form (write-side payload) AND the AgentCore-stringified-form (`{b64=<base64>}`) via regex. `get_conversation` now folds `{answer, sources, confidence, conversation_name, metadata}` into a `payload` field on the matching ASSISTANT message. Also normalizes role to lowercase at the boundary (fixed a small UX bug: historical messages were coming back as `"USER"/"ASSISTANT"` uppercase, which `st.chat_message` doesn't render default avatars for).
+
+**Auto-touched** (CDK-side): [infra/cdk.json](infra/cdk.json) — CDK rewrote the `app` command from `env -u PYTHONPATH python3 -P app.py` → `env -u PYTHONPATH .venv/bin/python -P app.py`. Useful pin to the venv python; kept in the commit.
+
+**Not changed**: PLAN.md (architecturally unchanged — just added Phase 13 row to phase table); README.md (added gotcha #8 + tiny note in §4.6; structure unchanged).
+
+### 26.3 Live verification (2026-05-26 mid-day)
+
+Two-pass deploy:
+1. First deploy (sidecar as nested dict): smoke 7/7 PASS, but end-to-end test showed `has_payload=False` on reload — see §26.4 for the diagnosis.
+2. Second deploy (base64 workaround): smoke 7/7 PASS, `has_payload=True` on reload for BOTH `/query` and `/query-stream`.
+
+End-to-end evidence (verified by Miguel in browser):
+- Fresh conversation → ask a question → response renders → **conversation entry appears in sidebar immediately** (Issue 1 fixed via `st.rerun()` on first-turn assistant message). ✓
+- Click `+ New conversation` then click back to the previous conversation → **confidence badge + sources expander visible** under the assistant message (Issue 2 fixed via the blob sidecar). ✓
+- Streaming path: same behavior on reload. ✓
+- `scripts/smoke_test.py` → 7/7 PASS after final deploy. ✓
+- 37 unit tests + 17 synth tests pass. ✓
+- `cdk diff StorageStack AuthStack`: 0 differences (Phase 13 didn't touch them). ✓
+- ApiStack URLs unchanged (`u8czd0hetb...`, `hoofegy2phbjzrh4w4pgj42bgu0cecor.lambda-url...`) — both deploys were in-place container updates, not resource replacements.
+
+### 26.4 The AgentCore Memory blob round-trip quirk (codified)
+
+AgentCore Memory's `PayloadType` defines a `blob` member of type `Document` (Smithy doc:true, sensitive:true — verified via `botocore.loaders` against `service-2.json`). On **write**, you can pass any JSON-shape (dict, list, string, number) and AgentCore accepts it. But on **read** via `ListEvents`, the Document is returned to boto3 as a Python `str` rendering of the Java SDK's `toString()` output — looks like:
+
+```
+{retrieval_strategy=bedrock-kb-s3vectors-titan-v2-topk, model_id=anthropic.claude-haiku-4-5-20251001-v1:0, sources=[{snippet=..., score=0.63, ...}]}
+```
+
+Unquoted keys, `=` separator, no escaping. **Not parseable as JSON.**
+
+Workaround applied: write the entire metadata payload as a urlsafe-base64-encoded JSON string inside a single Document field (`{"blob": {"b64": "<base64>"}}`). The toString output is then `{b64=<base64>}`, and base64's alphabet (`A-Za-z0-9_-=`) doesn't include `,` or `}`, so the value is regex-extractable cleanly. Decoder at [lambda/conversations.py:18-43](lambda/conversations.py#L18-L43).
+
+Saved as [[feedback-agentcore-memory-blob-roundtrip]] for future sessions — this will bite any future code that tries to use AgentCore Memory blob payloads for structured data.
+
+### 26.5 Things future-Claude should know about Phase 13
+
+- The Streamlit client now reads `top_k` and `use_stream` from `st.session_state` (set in the Settings popover). The chat handler at the bottom reads from session_state too — don't move the popover code BELOW the handler or the values won't be defined on first run.
+- The `_extract_blob_meta` helper has TWO code paths (dict + str) because boto3 SDK behavior for AgentCore blob reads might change in future SDK versions. If a future Claude session sees the dict path firing again (because boto3 fixed the round-trip), the regex path becomes dead code — safe to remove, but the dict path is the future-proof one.
+- The `@st.dialog` decorator is stable as of Streamlit 1.35 (we're on 1.56). The upload flow now lives inside the dialog and uses `st.status` for the poll loop — this works inside dialogs, verified live.
+- The CSS injection block uses `[data-testid="stCaptionContainer"]` for the time-bucket headers — this is a stable selector. The active-conversation highlight uses `button[kind="primary"]` (set via `type="primary"` on the matching button), with CSS overriding the default saturated primary fill to a subtle accent tint.
+- `streamlit_client/.streamlit/config.toml` IS committed; `secrets.toml` IS NOT (gitignored). The two are different — config.toml is reproducible UI configuration; secrets.toml is account-specific runtime values.
+- Migration: any pre-Phase-13 conversations don't have the blob sidecar. They reload text-only — the `_render_assistant` fallback path (`st.markdown(msg["content"])`) handles this correctly. If a future session wants full backfill, write a one-shot script that calls `list_events` for each (actor_id, session_id) and re-creates events with the blob. Not done in Phase 13 because (a) Miguel didn't ask, (b) the cost of re-running Bedrock retrieve+invoke for old turns is non-trivial.
+- The deploy required Docker Desktop to be running. If Docker isn't up when `cdk deploy` runs, the agent container build fails with `failed to connect to the docker API`. `open -a Docker && sleep 30` reliably starts it.
+
+### 26.6 Cost incurred this phase
+
+~$0.20 total: two `cdk deploy AgentStack ApiStack` cycles (docker push + arm64 cross-build dominated each), ~10 Bedrock calls across smoke + end-to-end verification. No new resources. Cumulative project spend across 13 phases is still under **$3.50** of the $20 budget. AgentCore Runtime continues to idle at ~$0.20–0.50/day.
+
+### 26.7 Memory updates this phase
+
+- New feedback memory [[feedback-agentcore-memory-blob-roundtrip]] codifying the Document-type stringification quirk + base64 workaround.
+- MEMORY.md index refreshed to include the new memory.
+
+---
+
 ## 20. Closing pointer (post-project)
 
-The core project is complete and **production-like deployed** (Phase 12 — live at https://rag-aws-kb.streamlit.app). If you start a new session in this repo:
+The core project is complete and **production-like deployed** (Phase 13 — live at https://rag-aws-kb.streamlit.app). If you start a new session in this repo:
 
 1. **Read [README.md](README.md) first** — canonical reviewer entry point. §10.0 has the local two-command developer loop; §10.6 has the prod Streamlit Cloud runbook.
-2. Read this handoff doc only if you need historical context: phase-by-phase build log, the two Phase-5 production incidents (§14), the password-sync incident (§24), or the prod-deploy details (§25 = Phase 12, most recent).
-3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan; the phase status table is current through Phase 12.
+2. Read this handoff doc only if you need historical context: phase-by-phase build log, the two Phase-5 production incidents (§14), the password-sync incident (§24), the prod-deploy details (§25 = Phase 12), or the most-recent UI redesign + sources-persistence work (§26 = Phase 13, **most recent**).
+3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan; the phase status table is current through Phase 13.
 4. **Before assuming the live system is up**, run `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` and `curl -I https://rag-aws-kb.streamlit.app/_stcore/health` — Miguel may have destroyed the stacks to zero cost. If stacks are gone, redeploy + re-paste Streamlit Cloud secrets ([§25.5 of this doc](#255-things-future-claude-should-know-about-phase-12) + [README §10.6](README.md)).
 5. **If Miguel reports auth/login problems locally**, check first that he's launching via `./scripts/run_streamlit.sh` (it auto-syncs `secrets.toml` from live AWS). **If the problem is on the public URL**, it's almost always stale Streamlit Cloud secrets after a redeploy → re-run `python scripts/print_streamlit_cloud_secrets.py | pbcopy` and re-paste.
 6. If asked to extend the project, do not re-litigate decisions in §3 / §21.1 / §22.1 / §25.1 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.

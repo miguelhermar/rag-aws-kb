@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import statistics
@@ -112,16 +113,33 @@ def is_first_turn(memory_id: str, actor_id: str, session_id: str) -> bool:
     return not resp.get("events", [])
 
 
-def write_memory(memory_id: str, actor_id: str, session_id: str, prompt: str, answer: str) -> None:
+def write_memory(
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    prompt: str,
+    answer: str,
+    assistant_meta: Dict | None = None,
+) -> None:
+    payload: List[Dict] = [
+        {"conversational": {"content": {"text": prompt}, "role": "USER"}},
+        {"conversational": {"content": {"text": answer}, "role": "ASSISTANT"}},
+    ]
+    if assistant_meta is not None:
+        # AgentCore Memory's Document-typed `blob` round-trips poorly: nested
+        # dicts come back as Java toString() reprs (unquoted keys, '=' seps).
+        # Workaround: stash JSON bytes inside a single base64 field so the
+        # toString output is `{b64=<alnum/_-=>}`, easy to extract on read.
+        meta_b64 = base64.urlsafe_b64encode(
+            json.dumps({"kind": "assistant_metadata", **assistant_meta}).encode("utf-8")
+        ).decode("ascii")
+        payload.append({"blob": {"b64": meta_b64}})
     agentcore.create_event(
         memoryId=memory_id,
         actorId=actor_id,
         sessionId=session_id,
         eventTimestamp=datetime.now(timezone.utc),
-        payload=[
-            {"conversational": {"content": {"text": prompt}, "role": "USER"}},
-            {"conversational": {"content": {"text": answer}, "role": "ASSISTANT"}},
-        ],
+        payload=payload,
     )
 
 
@@ -184,14 +202,27 @@ def run_query(
         for c in chunks
     ]
 
-    write_memory(MEMORY_ID, actor_id, session_id, prompt, answer)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    write_memory(
+        MEMORY_ID,
+        actor_id,
+        session_id,
+        prompt,
+        answer,
+        assistant_meta={
+            "sources": sources,
+            "confidence": confidence,
+            "latency_ms": latency_ms,
+            "model_id": MODEL_ID,
+            "retrieval_strategy": RETRIEVAL_STRATEGY,
+        },
+    )
 
     conversation_name = None
     if first_turn:
         conversation_name = generate_conversation_name(prompt)
         save_conversation_metadata(CONVERSATIONS_TABLE, actor_id, session_id, conversation_name)
-
-    latency_ms = int((time.perf_counter() - start) * 1000)
 
     return {
         "answer": answer,

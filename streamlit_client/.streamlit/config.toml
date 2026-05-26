@@ -1,0 +1,39 @@
+# Streamlit theme config. Defining both [theme.light] and [theme.dark] makes
+# the app follow the user's OS preference (with Settings menu override).
+# Sidebar gets its own slightly-different surface for ChatGPT-style contrast.
+
+[theme]
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+codeFont = "JetBrains Mono:https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseRadius = "0.5rem"
+
+[theme.light]
+primaryColor = "#10A37F"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F7F8"
+textColor = "#1F1F1F"
+borderColor = "#E5E5E7"
+linkColor = "#10A37F"
+
+[theme.light.sidebar]
+backgroundColor = "#F7F7F8"
+secondaryBackgroundColor = "#ECECEE"
+textColor = "#1F1F1F"
+borderColor = "#E5E5E7"
+primaryColor = "#10A37F"
+
+[theme.dark]
+primaryColor = "#10A37F"
+backgroundColor = "#0E0E10"
+secondaryBackgroundColor = "#1A1A1D"
+textColor = "#ECECEC"
+borderColor = "#2A2A2E"
+linkColor = "#10A37F"
+
+[theme.dark.sidebar]
+backgroundColor = "#171719"
+secondaryBackgroundColor = "#222226"
+textColor = "#ECECEC"
+borderColor = "#2A2A2E"
+primaryColor = "#10A37F"

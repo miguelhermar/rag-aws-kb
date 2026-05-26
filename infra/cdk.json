@@ -1,5 +1,5 @@
 {
-  "app": "env -u PYTHONPATH python3 -P app.py",
+  "app": "env -u PYTHONPATH .venv/bin/python -P app.py",
   "watch": {
     "include": ["**"],
     "exclude": [

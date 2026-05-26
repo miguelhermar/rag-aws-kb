@@ -34,6 +34,7 @@ reviewers.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import statistics
@@ -188,16 +189,31 @@ def _is_first_turn(actor_id: str, session_id: str) -> bool:
     return not resp.get("events", [])
 
 
-def _write_memory(actor_id: str, session_id: str, prompt: str, answer: str) -> None:
+def _write_memory(
+    actor_id: str,
+    session_id: str,
+    prompt: str,
+    answer: str,
+    assistant_meta: Optional[Dict] = None,
+) -> None:
+    payload: List[Dict] = [
+        {"conversational": {"content": {"text": prompt}, "role": "USER"}},
+        {"conversational": {"content": {"text": answer}, "role": "ASSISTANT"}},
+    ]
+    if assistant_meta is not None:
+        # See agent/rag.py write_memory: AgentCore Memory's blob Document
+        # field round-trips as Java toString() on read. Base64-encode the
+        # JSON payload so we get back `{b64=...}` which is regex-extractable.
+        meta_b64 = base64.urlsafe_b64encode(
+            json.dumps({"kind": "assistant_metadata", **assistant_meta}).encode("utf-8")
+        ).decode("ascii")
+        payload.append({"blob": {"b64": meta_b64}})
     _agentcore.create_event(
         memoryId=MEMORY_ID,
         actorId=actor_id,
         sessionId=session_id,
         eventTimestamp=datetime.now(timezone.utc),
-        payload=[
-            {"conversational": {"content": {"text": prompt}, "role": "USER"}},
-            {"conversational": {"content": {"text": answer}, "role": "ASSISTANT"}},
-        ],
+        payload=payload,
     )
 
 
@@ -383,12 +399,24 @@ async def query_stream(request: Request, authorization: Optional[str] = Header(d
                 yield _sse("sources", {"sources": sources})
                 final_answer = INSUFFICIENT_ANSWER
                 final_confidence = min(confidence, 0.2)
-                _write_memory(actor_id, session_id, req.question, final_answer)
+                latency_ms = int((time.perf_counter() - start) * 1000)
+                _write_memory(
+                    actor_id,
+                    session_id,
+                    req.question,
+                    final_answer,
+                    assistant_meta={
+                        "sources": sources,
+                        "confidence": final_confidence,
+                        "latency_ms": latency_ms,
+                        "model_id": MODEL_ID,
+                        "retrieval_strategy": RETRIEVAL_STRATEGY,
+                    },
+                )
                 conversation_name = None
                 if first_turn:
                     conversation_name = _generate_conversation_name(req.question)
                     _save_conversation_metadata(actor_id, session_id, conversation_name)
-                latency_ms = int((time.perf_counter() - start) * 1000)
                 yield _sse(
                     "done",
                     {
@@ -428,13 +456,24 @@ async def query_stream(request: Request, authorization: Optional[str] = Header(d
 
             yield _sse("sources", {"sources": sources})
 
-            _write_memory(actor_id, session_id, req.question, final_answer)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            _write_memory(
+                actor_id,
+                session_id,
+                req.question,
+                final_answer,
+                assistant_meta={
+                    "sources": sources,
+                    "confidence": final_confidence,
+                    "latency_ms": latency_ms,
+                    "model_id": MODEL_ID,
+                    "retrieval_strategy": RETRIEVAL_STRATEGY,
+                },
+            )
             conversation_name = None
             if first_turn:
                 conversation_name = _generate_conversation_name(req.question)
                 _save_conversation_metadata(actor_id, session_id, conversation_name)
-
-            latency_ms = int((time.perf_counter() - start) * 1000)
             log.info(
                 "stream.success",
                 latency_ms=latency_ms,

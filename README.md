@@ -330,6 +330,8 @@ Every turn writes **one event** to AgentCore Memory under `(actor_id, session_id
 
 `is_first_turn` is detected by `list_events(maxResults=1)`. On first turn only, the agent also writes a single DDB row with `conversation_name` (LLM-generated 3–5 words) + `created_at` (Unix epoch int). The sidebar reads from DDB (fast `Query`); replay reads from Memory (paginated `ListEvents`). This is the same shape used by both `/query` and `/query-stream`.
 
+**Phase 13 addition — sources / confidence persist across reloads.** Each `create_event` now also writes a third `blob` payload item carrying base64-encoded JSON: `{sources, confidence, latency_ms, model_id, retrieval_strategy}`. On `GET /conversations/{session_id}`, that sidecar is decoded and attached as a `payload` field on the corresponding ASSISTANT message — so when the Streamlit client reloads a past conversation it can render the confidence badge + sources expander, not just the answer text. (Base64 is a workaround for an AgentCore Memory Document-type round-trip quirk — see Gotcha #8 in §7.)
+
 ---
 
 ## 5. Sample documents
@@ -412,7 +414,7 @@ A custom fictional `engineering-roadmap-XXXXXX.md` (~700 B) was uploaded, ingest
 
 ## 7. Gotchas from the live deploy
 
-Four AWS-side gotchas have hit this project across phases and are codified in the handoff doc + memory. They will hit again on a fresh redeploy if not handled:
+Eight AWS-side gotchas have hit this project across phases and are codified in the handoff doc + memory. They will hit again on a fresh redeploy if not handled:
 
 1. **AgentCore Runtime is arm64-only.** `DockerImageAsset` must build `linux/arm64`. From an x86 Mac the build cross-compiles via Docker Buildx + QEMU (slower first build, works thereafter).
 2. **Cognito Hosted UI domain prefixes cannot contain `aws`, `amazon`, or `cognito`.** The project uses `ragkb-{account-suffix}`.
@@ -421,7 +423,9 @@ Four AWS-side gotchas have hit this project across phases and are codified in th
 
 5. **Python Lambda has no native response streaming** — only Node.js does (as of May 2026). The streaming Lambda ships AWS Lambda Web Adapter (LWA) + FastAPI/uvicorn inside the container; the Function URL is configured with `InvokeMode=RESPONSE_STREAM` and `AWS_LWA_INVOKE_MODE=response_stream`. This is the only supported pattern.
 6. **Presigned PUT requires the client to echo the exact `Content-Type` it was signed with**, or S3 returns 403 `SignatureDoesNotMatch`. The presigned URL is also SigV4-signed (`signature_version="s3v4"`) explicitly so the legacy SigV2 fallback can't break the contract.
-7. **Every `cdk destroy --all` + redeploy rotates the App Client ID, User Pool ID, App Client secret, API URL, and Function URL.** Hand-maintained `streamlit_client/.streamlit/secrets.toml` will be stale and the login button surfaces a generic "authentication error" (Cognito 404s on the dead user pool's `/oauth2/authorize`). Local dev: always launch via `./scripts/run_streamlit.sh`, which reads live values from `aws cloudformation describe-stacks` + Secrets Manager on every run. **Production (Streamlit Cloud)**: re-run `python scripts/print_streamlit_cloud_secrets.py | pbcopy` and re-paste into Streamlit Cloud → App settings → Secrets (no equivalent auto-sync because Streamlit Cloud secrets are dashboard-managed with no public API).
+7. **AgentCore Memory `blob` payload items round-trip poorly** (Phase 13 discovery). The Smithy `Document` type accepts any JSON shape on `CreateEvent`, but `ListEvents` returns it to boto3 as a Python `str` of the Java SDK's `toString()` repr — unquoted keys, `=` separators, no escaping. Not parseable as JSON. The persistence layer in [agent/rag.py](agent/rag.py) + [lambda_stream/stream_app.py](lambda_stream/stream_app.py) works around this by encoding the full per-turn metadata as urlsafe-base64 inside a single Document field (`{"blob": {"b64": "<base64>"}}`); on read, [lambda/conversations.py](lambda/conversations.py) regex-extracts and decodes. Avoid passing nested dicts directly into AgentCore Memory blobs until/unless AWS fixes the round-trip.
+
+8. **Every `cdk destroy --all` + redeploy rotates the App Client ID, User Pool ID, App Client secret, API URL, and Function URL.** Hand-maintained `streamlit_client/.streamlit/secrets.toml` will be stale and the login button surfaces a generic "authentication error" (Cognito 404s on the dead user pool's `/oauth2/authorize`). Local dev: always launch via `./scripts/run_streamlit.sh`, which reads live values from `aws cloudformation describe-stacks` + Secrets Manager on every run. **Production (Streamlit Cloud)**: re-run `python scripts/print_streamlit_cloud_secrets.py | pbcopy` and re-paste into Streamlit Cloud → App settings → Secrets (no equivalent auto-sync because Streamlit Cloud secrets are dashboard-managed with no public API).
 
 ---
 
