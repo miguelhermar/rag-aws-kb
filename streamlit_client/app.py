@@ -5,9 +5,45 @@ import datetime
 import json
 import time
 import uuid
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import requests
 import streamlit as st
+
+
+def _patch_cognito_logout() -> None:
+    # Cognito's /logout endpoint ignores the OIDC-standard `post_logout_redirect_uri`
+    # parameter that Streamlit's logout flow sends, then treats the request as a
+    # re-login and 302s to /login?...&post_logout_redirect_uri=..., which errors with
+    # "Required string parameter redirect_uri is not present." Swap to Cognito's
+    # proprietary `logout_uri` parameter, scoped to the origin so it matches the
+    # registered logout URLs in auth_stack.py.
+    try:
+        from streamlit.web.server import oauth_authlib_routes
+    except ImportError:
+        return
+
+    def cognito_build_logout_url(
+        end_session_endpoint: str,
+        client_id: str,
+        post_logout_redirect_uri: str,
+        id_token: str | None = None,
+    ) -> str:
+        parsed_redirect = urlparse(post_logout_redirect_uri)
+        origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+        parsed = urlparse(end_session_endpoint)
+        merged = {
+            **dict(parse_qsl(parsed.query)),
+            "client_id": client_id,
+            "logout_uri": origin,
+        }
+        return parsed._replace(query=urlencode(merged)).geturl()
+
+    oauth_authlib_routes.build_logout_url = cognito_build_logout_url
+
+
+_patch_cognito_logout()
+
 
 REQUEST_TIMEOUT_S = 30
 TOKEN_REFRESH_LEEWAY_S = 60
