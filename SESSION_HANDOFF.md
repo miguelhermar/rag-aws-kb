@@ -2,9 +2,9 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-25 (late evening), after **Phase 10 — developer-loop polish**: added `scripts/run_streamlit.sh` which auto-syncs `secrets.toml` from live CloudFormation + Secrets Manager, so the daily loop is now exactly `cdk deploy --all` then `./scripts/run_streamlit.sh`. No manual editing of `secrets.toml` ever again. See §23. (Earlier today: **Phase 9** — streaming (9a) + upload + ingestion (9b). Phases 1-3 in `e3925e5`, 4 in `e7c6d14`, 5 in `20add17`, handoff cleanup in `602822d`, 6 in `49d7ecc`, 7 in the bundled commit on `main`, 8 in `f9d55d3`, sidebar fix in `4e5c7da`, 9a in `fe865c5`, 9b in `08464ac`, Phase 10 pending commit.) README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 now has the two-command TL;DR.
+**Last updated**: 2026-05-25 (evening), after **Phase 12 — production-like deploy** (verified live): the 4 CDK stacks were updated in place to add APIGW per-method throttling + multi-origin CORS + Cognito callback URLs for **Streamlit Community Cloud**. The Streamlit client is now publicly reachable at **https://rag-aws-kb.streamlit.app**, hosted free on Streamlit Cloud (AWS App Runner stopped accepting new customers 2026-04-30; see [[feedback-aws-apprunner-unavailable]]). End-to-end browser walkthrough confirmed by Miguel (login + streaming + non-streaming chat + upload + sidebar conversations). See §25. The local dev loop (`./scripts/run_streamlit.sh` from Phase 10) still works against the same prod stacks. README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 has the local TL;DR, §10.6 has the prod Streamlit Cloud runbook.
 
-**Important**: between the previous session and the Phase 6 session, Miguel ran `cdk destroy` to zero out idle AWS cost; Phase 6 redeployed both stacks. As of the end of Phase 7 the stacks are still deployed and the live API at the URL in §8 is responding 200 to `/health`. If Miguel runs `cdk destroy` again after submission, the IDs in §8 will be stale — but the README ([README.md](README.md)) is now the canonical reviewer entry point and explicitly notes that IDs rotate per redeploy.
+**Important**: the stacks are deployed in account `954863244564` / region `us-east-1` and the system is live at the URL above. If Miguel runs `cdk destroy --all`, every Cognito ID + API URL + App Client secret rotates — the *local* launcher auto-syncs on next run, but the Streamlit Cloud secrets must be re-pasted manually from `scripts/print_streamlit_cloud_secrets.py`. README §10.6 covers the post-redeploy ritual.
 
 ---
 
@@ -848,12 +848,19 @@ Elected per [[project-phase12-production-deploy-planned]]. Goal: ship a publicly
 - **Tests: 76/76 PASS** — 59 unit (in `venv/`) + 17 synth (in `infra/.venv/`).
 - Repo audit before GitHub push: no AKIA/AIza/sk-/ghp_/xoxb tokens in tracked files; `.env`, `secrets.toml`, `cdk-outputs.json` all gitignored; `legacy/.streamlit/secrets.toml` is tracked but contains only commented placeholders (safe).
 
-### 25.4 Live verification (pending — see below)
+### 25.4 Live verification (2026-05-25 evening — verified)
 
-To run after Miguel pushes the repo to public GitHub + completes the one-time Streamlit Cloud setup ([§10.6 of README](README.md)):
-- `cdk deploy --all` against current dev stacks (in-place upgrade — non-destructive).
-- Push to GitHub + connect Streamlit Cloud + set custom subdomain `rag-aws-kb` + paste TOML from `scripts/print_streamlit_cloud_secrets.py`.
-- Browser walkthrough end-to-end on the public URL: login via Cognito Hosted UI → `/query` (REST) → `/query-stream` (SSE) → upload + ingest → list past conversations → log out. Same as [§10.4.1 of README](README.md) but pointed at `rag-aws-kb.streamlit.app` instead of `localhost:8501`.
+End-to-end live walkthrough on **https://rag-aws-kb.streamlit.app**, confirmed by Miguel:
+
+- `cdk deploy --all` against existing stacks: all 4 stacks `UPDATE_COMPLETE` (StorageStack + AgentStack: no diff; AuthStack + ApiStack: in-place updated). Same `UserPoolId` / `ApiUrl` / `StreamFunctionUrl` as end of Phase 11 — no ID rotation. ✅
+- 7/7 smoke tests pass against the deployed REST + SSE surface (throttling + multi-origin CORS introduced no regressions). ✅
+- Public GitHub repo created (`rag-aws-kb`) and pushed. ✅
+- Streamlit Community Cloud app connected to `streamlit_client/app.py`, Python 3.12, custom subdomain `rag-aws-kb` reserved. ✅
+- Secrets pasted into Streamlit Cloud Secrets editor via `python scripts/print_streamlit_cloud_secrets.py | pbcopy`. ✅
+- **Browser walkthrough on the public URL** (Miguel's report): Cognito Hosted UI login as `demo` succeeded (password fetched from the Secrets Manager console — the CLI one-liner in [README §10.4](README.md) does the same); chat works with both streaming and non-streaming toggles; file upload + ingestion completes; sidebar past-conversations renders and replays correctly. ✅
+- Leaked Gemini key in legacy `.env` revoked on Google AI Studio. ✅
+
+The system is now publicly reachable and end-to-end functional at the prod URL. No outstanding Phase 12 work.
 
 ### 25.5 Things future-Claude should know about Phase 12
 
@@ -866,25 +873,26 @@ To run after Miguel pushes the repo to public GitHub + completes the one-time St
 
 ### 25.6 Cost incurred this phase
 
-~$0.02 — `cdk diff` made a handful of changeset previews; no resource churn beyond the stage settings update. The actual `cdk deploy` happens during live verification (next step).
+~$0.02 — `cdk diff` + the in-place `cdk deploy --all`. No new resources beyond stage settings + Cognito App Client property updates + Function URL property update. Cumulative project spend across 12 phases is still under **$3** of the $20 budget. AgentCore Runtime continues to idle at ~$0.20–0.50/day; Streamlit Cloud is free.
 
 ### 25.7 Memory updates this phase
 
-- New project memory `project-phase12-production-deploy-done` (will be saved after live verification passes).
-- Updated [[project-phase12-production-deploy-planned]] to point at the now-completed Phase 12 record.
+- New project memory [[project-phase12-production-deploy-done]] saved (replaces the now-deleted `project-phase12-production-deploy-planned`).
+- New feedback memory [[feedback-aws-apprunner-unavailable]] codifying the App Runner cutoff so future projects default to Streamlit Cloud / ECS Fargate.
+- MEMORY.md index refreshed to point at the new files.
 
 ---
 
 ## 20. Closing pointer (post-project)
 
-The core project is complete. If you start a new session in this repo:
+The core project is complete and **production-like deployed** (Phase 12 — live at https://rag-aws-kb.streamlit.app). If you start a new session in this repo:
 
-1. **Read [README.md](README.md) first** — it is now the canonical entry point and supersedes this handoff doc for anything reviewer-facing. §10.0 has the two-command developer loop.
-2. Read this handoff doc only if you need historical context: how decisions were made, what the two production incidents taught us (§14), the phase-by-phase build log. Most recent phase = §23 (Phase 10 — `scripts/run_streamlit.sh` developer-loop polish).
-3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan.
-4. **Before assuming the live system is up**, check `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` — Miguel may have destroyed the stacks to zero cost after submission.
-5. **If Miguel reports auth/login problems in Streamlit**, the very first check is whether he's launching via `./scripts/run_streamlit.sh` (it auto-syncs `secrets.toml` from live AWS). Stale `secrets.toml` post-redeploy is the most likely cause and surfaces as a generic "authentication error" on the login button. See §23.
-6. If asked to extend the project, do not re-litigate decisions in §3 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
+1. **Read [README.md](README.md) first** — canonical reviewer entry point. §10.0 has the local two-command developer loop; §10.6 has the prod Streamlit Cloud runbook.
+2. Read this handoff doc only if you need historical context: phase-by-phase build log, the two Phase-5 production incidents (§14), the password-sync incident (§24), or the prod-deploy details (§25 = Phase 12, most recent).
+3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan; the phase status table is current through Phase 12.
+4. **Before assuming the live system is up**, run `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` and `curl -I https://rag-aws-kb.streamlit.app/_stcore/health` — Miguel may have destroyed the stacks to zero cost. If stacks are gone, redeploy + re-paste Streamlit Cloud secrets ([§25.5 of this doc](#255-things-future-claude-should-know-about-phase-12) + [README §10.6](README.md)).
+5. **If Miguel reports auth/login problems locally**, check first that he's launching via `./scripts/run_streamlit.sh` (it auto-syncs `secrets.toml` from live AWS). **If the problem is on the public URL**, it's almost always stale Streamlit Cloud secrets after a redeploy → re-run `python scripts/print_streamlit_cloud_secrets.py | pbcopy` and re-paste.
+6. If asked to extend the project, do not re-litigate decisions in §3 / §21.1 / §22.1 / §25.1 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.
 7. **If Miguel asks about "optional extensions" or "what's next"**, point at [§19](#19-optional-extensions--candidate-list-for-future-sessions) and let him pick. Do not implement any of them proactively.
 
-If asked: **"What's left?"** — the answer is "nothing *required*; **5 of 8 optional extensions are now done** (DDB + AgentCore Runtime + AgentCore Memory in Phase 8; streaming + upload/ingest in Phase 9; plus Cognito JWT as a bonus). The remaining items in [§19](#19-optional-extensions--candidate-list-for-future-sessions) are CI/CD, guardrails/safety filters, human-feedback collection, and cost-controls / token-tracking."
+If asked: **"What's left?"** — the answer is "nothing *required*; **6 of 8 optional extensions are now done** (DDB + AgentCore Runtime + AgentCore Memory in Phase 8; streaming + upload/ingest in Phase 9; cost controls partially via Phase 12 APIGW throttling; plus Cognito JWT + Streamlit Cloud public deploy as bonuses). The remaining items in [§19](#19-optional-extensions--candidate-list-for-future-sessions) are CI/CD pipeline, guardrails/safety filters, human-feedback collection, and per-token usage tracking (the throttling-replaces-UsagePlan piece counts as partial cost-control, but a real budget alarm + per-`actor_id` rate limit are still open)."

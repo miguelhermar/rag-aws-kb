@@ -1,6 +1,6 @@
 # RAG-AWS Productionization — Implementation Plan
 
-> This is the canonical implementation plan, current as of 2026-05-25 (Phase 10).
+> This is the canonical implementation plan, current as of 2026-05-25 (Phase 12 — production-like deploy).
 > For the phase-by-phase build log + live AWS resource IDs, see [SESSION_HANDOFF.md](SESSION_HANDOFF.md).
 > For the reviewer-facing overview, see [README.md](README.md).
 
@@ -31,7 +31,7 @@ The implementation went beyond the brief minimum by electing five of the listed 
 | Region | **`us-east-1`** (hard-pinned in [infra/app.py](infra/app.py)) | S3 Vectors GA region + widest Bedrock model availability. |
 | Legacy code | Moved to [legacy/](legacy/) | Preserves diff for "changes from sample" narrative without polluting root. |
 
-## Target architecture (4 stacks, current as of Phase 9/10)
+## Target architecture (4 stacks, current as of Phase 12)
 
 ```
 LOCAL                                          AWS (us-east-1)
@@ -204,7 +204,7 @@ Four stacks in [infra/stacks/](infra/stacks/) with in-memory cross-stack refs (N
 - `UserPoolClient` (App Client with secret, `OAuthFlows.authorization_code_grant`, scopes `openid email profile`, callbacks `http://localhost:8501/oauth2callback`, token lifetimes: ID/access 1h, refresh 30d)
 - `UserPoolDomain` (`ragkb-{account-suffix}` — Cognito reserves `aws`/`amazon`/`cognito` prefixes)
 - `CfnUserPoolUser` `demo` (`MessageAction=SUPPRESS`, attributes `email=demo@acmenotes.example`)
-- Test-user password generated into Secrets Manager; **a Lambda-backed Custom Resource** reads the secret via boto3 at runtime and calls `AdminSetUserPassword` (Phase 10 hardening fix — closed the gotcha that previously required a manual `aws cognito-idp admin-set-user-password` after every fresh deploy). The original `AwsCustomResource` + `secret_value.unsafe_unwrap()` pattern is broken in this context because CFN [does not resolve `secretsmanager` dynamic refs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html) inside Custom Resource properties — the literal `{{resolve:...}}` string was being passed as the password.
+- Test-user password generated into Secrets Manager; **a Lambda-backed Custom Resource** reads the secret via boto3 at runtime and calls `AdminSetUserPassword` (Phase 11 hardening fix — closed the gotcha that previously required a manual `aws cognito-idp admin-set-user-password` after every fresh deploy). The original `AwsCustomResource` + `secret_value.unsafe_unwrap()` pattern is broken in this context because CFN [does not resolve `secretsmanager` dynamic refs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html) inside Custom Resource properties — the literal `{{resolve:...}}` string was being passed as the password.
 - App Client secret copied into a Secrets Manager secret so it can be referenced by the launcher (Cognito doesn't expose the secret as a CFN output otherwise)
 - Outputs: `UserPoolId`, `UserPoolArn`, `UserPoolClientId`, `UserPoolClientSecretArn`, `TestUserPasswordSecretArn`, `UserPoolDomain`, `OAuthDiscoveryUrl`, `TestUserName`
 
@@ -282,6 +282,8 @@ Each phase ran as a tight, self-contained brief sent to a `general-purpose` sub-
 | 9a | Streaming responses via Lambda Function URL + SSE | ✅ + live-deployed |
 | 9b | Upload + ingestion REST endpoints (`/documents`, `/ingest`, `/ingest/{id}`) | ✅ + live-deployed |
 | 10 | `scripts/run_streamlit.sh` developer-loop polish (auto-syncs `secrets.toml` from live CFN + Secrets Manager) | ✅ |
+| 11 | Consistency review + Lambda-backed test-user password sync (closed the `AwsCustomResource` + `unsafe_unwrap()` trap) | ✅ + live-redeployed |
+| 12 | Production-like deploy: APIGW method throttling + multi-origin CORS + Cognito callbacks for Streamlit Community Cloud at `rag-aws-kb.streamlit.app` | ✅ + live-deployed |
 
 ## Sample documents
 
@@ -290,7 +292,7 @@ Each phase ran as a tight, self-contained brief sent to a `general-purpose` sub-
 ## Auth wiring
 
 - CDK creates the User Pool, App Client (with secret), Hosted UI domain, and one pre-created `demo` user.
-- The test-user password is generated into Secrets Manager. `AwsCustomResource` calls `AdminSetUserPassword`; `physical_resource_id` is the secret's ARN so a fresh deploy after `cdk destroy --all` re-fires the call automatically (no manual `admin-set-user-password` ritual needed — Phase 10 hardening fix).
+- The test-user password is generated into Secrets Manager. `AwsCustomResource` calls `AdminSetUserPassword`; `physical_resource_id` is the secret's ARN so a fresh deploy after `cdk destroy --all` re-fires the call automatically (no manual `admin-set-user-password` ritual needed — Phase 11 hardening fix).
 - App Client secret copied into a Secrets Manager secret for launcher consumption.
 - [scripts/run_streamlit.sh](scripts/run_streamlit.sh) reads `aws cloudformation describe-stacks` (AuthStack + ApiStack) + Secrets Manager → rewrites `streamlit_client/.streamlit/secrets.toml` → `exec`s Streamlit. **The reviewer never edits `secrets.toml` by hand.**
 - Streamlit calls `st.login()` → Cognito Hosted UI → callback to `http://localhost:8501/oauth2callback` → ID token on `st.user.tokens["id"]`. Sent as `Authorization: Bearer …` on every backend call.
@@ -380,5 +382,6 @@ Plus one bonus: Cognito User Pool + JWT auth (replaced the API-key path entirely
 | 6 | Cognito Hosted UI prefix can't contain `aws`/`amazon`/`cognito` | Uses `ragkb-{account-suffix}` |
 | 7 | DDB `Decimal` ↔ `json.dumps` | Explicit `int()` coercion at the boundary in [lambda/conversations.py](lambda/conversations.py) |
 | 8 | Presigned PUT requires the client to echo the signed `Content-Type` | Streamlit sends `Content-Type` explicitly; smoke test covers the contract |
-| 9 | `cdk destroy --all` rotates every ID | `scripts/run_streamlit.sh` reads live values from CFN + Secrets Manager on every launch |
-| 10 | $20 budget runaway | UsagePlan removed with API key (Cognito JWT path doesn't have per-key quotas) — replacement is the budget alarm hardening item; for now, cumulative spend across 10 phases is under $2.50 of $20 |
+| 9 | `cdk destroy --all` rotates every ID | `scripts/run_streamlit.sh` reads live values from CFN + Secrets Manager on every launch (local dev); `scripts/print_streamlit_cloud_secrets.py` prints a paste-ready TOML for the Streamlit Cloud Secrets editor (prod) |
+| 10 | $20 budget runaway | API-key UsagePlan removed in Phase 8; Phase 12 added per-method APIGW throttling (rate=10/burst=20 on most routes, 5/10 on `/ingest`) as the replacement. Cumulative spend across 12 phases under $3 of $20. |
+| 11 | Streamlit Cloud secrets are dashboard-managed (no public API) | After each `cdk destroy --all` + redeploy, re-run `scripts/print_streamlit_cloud_secrets.py | pbcopy` and paste into Streamlit Cloud Secrets editor. Cookie secret persisted locally to keep sessions warm across re-pastes. |
