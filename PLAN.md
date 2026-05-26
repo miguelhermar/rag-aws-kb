@@ -1,6 +1,6 @@
 # RAG-AWS Productionization — Implementation Plan
 
-> This is the canonical implementation plan, current as of 2026-05-26 (Phase 13 — UI redesign + sources-on-reload persistence).
+> This is the canonical implementation plan, current as of 2026-05-26 (Phase 14 — CDK-native KB pre-seeding).
 > For the phase-by-phase build log + live AWS resource IDs, see [SESSION_HANDOFF.md](SESSION_HANDOFF.md).
 > For the reviewer-facing overview, see [README.md](README.md).
 
@@ -285,6 +285,7 @@ Each phase ran as a tight, self-contained brief sent to a `general-purpose` sub-
 | 11 | Consistency review + Lambda-backed test-user password sync (closed the `AwsCustomResource` + `unsafe_unwrap()` trap) | ✅ + live-redeployed |
 | 12 | Production-like deploy: APIGW method throttling + multi-origin CORS + Cognito callbacks for Streamlit Community Cloud at `rag-aws-kb.streamlit.app` | ✅ + live-deployed |
 | 13 | UI redesign (ChatGPT-style sidebar with time-buckets + active highlight, theme.toml auto light/dark, header Settings popover + Upload dialog, Acme removed from UI strings) + per-turn `sources`/`confidence`/`latency_ms`/`model_id` persistence via base64-encoded AgentCore Memory `blob` sidecar so reloaded conversations render the full assistant payload | ✅ + live-redeployed |
+| 14 | CDK-native KB pre-seeding (StorageStack `BucketDeployment` + Lambda-backed `SeedKnowledgeBase` CR fires `StartIngestionJob` on every `cdk deploy`; SHA-256 content hash makes unchanged redeploys no-ops; `prune=False` preserves Phase 9 user uploads). Operator scripts retained for manual re-ingests but no longer required for a fresh deploy. | ✅ + live-deployed |
 
 ## Sample documents
 

@@ -55,6 +55,71 @@ def test_storage_stack_has_memory_and_table(stacks):
     )
 
 
+def test_storage_stack_has_seed_bucket_deployment(stacks):
+    """Pre-seed: BucketDeployment custom resource pushes sample-docs/ to the
+    docs bucket on every deploy (`prune=False` so user uploads survive)."""
+    storage, _, _, _ = stacks
+    template = Template.from_stack(storage)
+    # CDK BucketDeployment renders as Custom::CDKBucketDeployment<hash>.
+    custom_resources = template.find_resources("AWS::CloudFormation::CustomResource")
+    custom_resources.update(template.find_resources("Custom::CDKBucketDeployment"))
+    # Also scan all resource types prefixed Custom::CDKBucketDeployment*.
+    all_resources = template.to_json().get("Resources", {})
+    deploy_resources = [
+        r for r, body in all_resources.items()
+        if body.get("Type", "").startswith("Custom::CDKBucketDeployment")
+    ]
+    assert len(deploy_resources) >= 1, (
+        "expected at least one Custom::CDKBucketDeployment resource for seed docs"
+    )
+    # Prune must be False to preserve Phase 9 user uploads under uploads/*.
+    for r in deploy_resources:
+        props = all_resources[r].get("Properties", {})
+        assert props.get("Prune") is False, (
+            "SeedDocsDeployment must use Prune=False to preserve user uploads"
+        )
+
+
+def test_storage_stack_has_seed_ingestion_custom_resource(stacks):
+    """Pre-seed: CustomResource that calls bedrock-agent.StartIngestionJob after
+    the BucketDeployment finishes, with a content-hash property so unchanged
+    redeploys are no-ops."""
+    storage, _, _, _ = stacks
+    template = Template.from_stack(storage)
+    found = False
+    for body in template.to_json().get("Resources", {}).values():
+        if body.get("Type") != "AWS::CloudFormation::CustomResource":
+            continue
+        props = body.get("Properties", {})
+        if "ContentHash" in props and "KbId" in props and "DataSourceId" in props:
+            found = True
+            break
+    assert found, (
+        "expected a CustomResource with KbId+DataSourceId+ContentHash for seed ingestion"
+    )
+
+
+def test_seed_ingestion_lambda_has_bedrock_ingestion_actions(stacks):
+    """Pre-seed: the seed-ingestion Lambda must hold StartIngestionJob +
+    GetIngestionJob scoped to the KB ARN (not the data-source ARN)."""
+    storage, _, _, _ = stacks
+    template = Template.from_stack(storage)
+    found_start = found_get = False
+    for pol in template.find_resources("AWS::IAM::Policy").values():
+        for stmt in (
+            pol.get("Properties", {}).get("PolicyDocument", {}).get("Statement", [])
+        ):
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            if "bedrock:StartIngestionJob" in (actions or []):
+                found_start = True
+            if "bedrock:GetIngestionJob" in (actions or []):
+                found_get = True
+    assert found_start, "seed-ingestion Lambda missing bedrock:StartIngestionJob"
+    assert found_get, "seed-ingestion Lambda missing bedrock:GetIngestionJob"
+
+
 def test_auth_stack_has_user_pool_client_and_user(stacks):
     _, auth, _, _ = stacks
     template = Template.from_stack(auth)

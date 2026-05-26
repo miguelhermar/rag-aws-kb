@@ -2,7 +2,9 @@
 
 **Purpose**: If you're a fresh Claude session opening this file, read it end-to-end. It contains everything you need to continue this project without losing context. The user expects you to resume from "Next Phase" without re-asking questions that are already settled below.
 
-**Last updated**: 2026-05-26 (mid-day), after **Phase 13 — UI redesign + sources-on-reload persistence** (verified live): the Streamlit client got a ChatGPT-style redesign (Acme branding removed, conversations-only sidebar with time-bucket grouping + active highlight, settings popover, upload moved into an `st.dialog`, user-identity popover at the bottom, theme.toml + Inter font with auto light/dark). Two backend changes redeployed AgentStack + ApiStack to persist per-turn `sources` + `confidence` + `latency_ms` + `model_id` to AgentCore Memory as a base64-encoded `blob` sidecar so reloading a past conversation now shows the full assistant payload (not just text). See §26 for the full record, including the discovered AgentCore Memory blob round-trip quirk (Document type comes back as a Java `toString()` repr on `ListEvents` — workaround: base64-in-document-field + regex-extract on read; codified in [[feedback-agentcore-memory-blob-roundtrip]]). README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 has the local TL;DR, §10.6 has the prod Streamlit Cloud runbook.
+**Last updated**: 2026-05-26 (evening), after **Phase 14 — CDK-native KB pre-seeding** (verified live): StorageStack now uses `aws_s3_deployment.BucketDeployment` + a Lambda-backed CustomResource to upload `sample-docs/*.md` and trigger `bedrock-agent.StartIngestionJob` on every `cdk deploy`. A SHA-256 of the seed corpus drives update semantics — unchanged redeploys are no-ops, changed seeds re-ingest the delta. `prune=False` preserves Phase 9 user uploads under `uploads/...`. Live verification: deploy + 7/7 smoke green; `cdk-seed` ingestion job indexed 6 docs in ~20s. The operator scripts (`upload_docs.py` + `start_ingestion.py`) remain for manual re-ingests but are no longer required on a fresh deploy. See §27.
+
+**Previous milestone**: 2026-05-26 (mid-day), **Phase 13 — UI redesign + sources-on-reload persistence** (verified live): the Streamlit client got a ChatGPT-style redesign (Acme branding removed, conversations-only sidebar with time-bucket grouping + active highlight, settings popover, upload moved into an `st.dialog`, user-identity popover at the bottom, theme.toml + Inter font with auto light/dark). Two backend changes redeployed AgentStack + ApiStack to persist per-turn `sources` + `confidence` + `latency_ms` + `model_id` to AgentCore Memory as a base64-encoded `blob` sidecar so reloading a past conversation now shows the full assistant payload (not just text). See §26 for the full record, including the discovered AgentCore Memory blob round-trip quirk (Document type comes back as a Java `toString()` repr on `ListEvents` — workaround: base64-in-document-field + regex-extract on read; codified in [[feedback-agentcore-memory-blob-roundtrip]]). README ([README.md](README.md)) is the canonical reviewer entry point; §10.0 has the local TL;DR, §10.6 has the prod Streamlit Cloud runbook.
 
 **Previous milestone**: 2026-05-25 (evening), **Phase 12 — production-like deploy** (verified live): the 4 CDK stacks were updated in place to add APIGW per-method throttling + multi-origin CORS + Cognito callback URLs for **Streamlit Community Cloud**. The Streamlit client is publicly reachable at **https://rag-aws-kb.streamlit.app**, hosted free on Streamlit Cloud (AWS App Runner stopped accepting new customers 2026-04-30; see [[feedback-aws-apprunner-unavailable]]). End-to-end browser walkthrough confirmed by Miguel. See §25. The local dev loop (`./scripts/run_streamlit.sh` from Phase 10) still works against the same prod stacks.
 
@@ -968,13 +970,52 @@ Saved as [[feedback-agentcore-memory-blob-roundtrip]] for future sessions — th
 
 ---
 
+## 27. Phase 14 — CDK-native KB pre-seeding (2026-05-26)
+
+Short session. One-file infra change so `cdk deploy --all` produces a chat-ready KB with no operator scripts. Brief §"minimum strong submission" lists "a pre-seeded or sample knowledge base using included sample documents"; until Phase 14 that was a two-script manual step (`scripts/upload_docs.py` + `scripts/start_ingestion.py`) tacked onto the deploy runbook. Now it's baked into the stack.
+
+### 27.1 What changed
+
+**[infra/stacks/storage_stack.py](infra/stacks/storage_stack.py)** — added two resources at the bottom of `StorageStack.__init__` (before the `CfnOutput` block):
+
+1. **`aws_s3_deployment.BucketDeployment`** (`SeedDocsDeployment`) — syncs `sample-docs/*.md` into the docs bucket root (same key shape `scripts/upload_docs.py` uses, so eval source-match patterns like `document=refund-policy.md` stay valid). **`prune=False` is critical** — Phase 9 user uploads live under `uploads/{yyyy-mm-dd}/...` and would be wiped on every redeploy without it.
+2. **Lambda-backed `CustomResource`** (`SeedKnowledgeBase` + `SeedIngestionFn`) — calls `bedrock-agent.StartIngestionJob` and polls every 5s up to a 240s deadline. Mirrors `scripts/start_ingestion.py` behavior (TERMINAL_OK={COMPLETE}, TERMINAL_FAIL={FAILED,STOPPED}). Same Lambda-backed CR pattern as `auth_stack.py` (Phase 11 lesson: dynamic-reference secrets don't resolve inside `Custom::AWS`). IAM scoped to `bedrock:StartIngestionJob`+`bedrock:GetIngestionJob` on the **KB ARN** (NOT data-source ARN — mirrors api_stack.py:258-266).
+
+**Trigger semantics**: the CR has a `ContentHash` property = SHA-256 over `(filename, bytes)` pairs of seed docs, sorted. Unchanged corpus = unchanged hash = no CFN diff = no-op (no wasted Titan embedding spend). Changing any seed doc → new hash → CFN sends `Update` → CR re-fires → KB ingests the delta.
+
+**[tests/test_synth.py](tests/test_synth.py)** — 3 new tests:
+- `test_storage_stack_has_seed_bucket_deployment` (asserts `Custom::CDKBucketDeployment*` exists + `Prune=False`)
+- `test_storage_stack_has_seed_ingestion_custom_resource` (asserts CR with `KbId+DataSourceId+ContentHash` properties)
+- `test_seed_ingestion_lambda_has_bedrock_ingestion_actions` (asserts both bedrock ingestion verbs)
+
+### 27.2 Live verification (2026-05-26 evening)
+
+- 79/79 tests pass (59 unit + 20 synth, +3 new).
+- `cdk diff StorageStack` was purely additive: 1 `Custom::CDKBucketDeployment` + 1 `AwsCliLayer` (BucketDeployment internals) + `SeedIngestionFn` + `SeedKnowledgeBase` CR + 1 LogRetention helper + 1 tag added to DocsBucket (`aws-cdk:cr-owned:<hash>`, BucketDeployment marker). No replacements. Other 3 stacks unchanged.
+- `cdk deploy StorageStack` → `UPDATE_COMPLETE` in 145s.
+- Ingestion job `E565VE8FEV` description `cdk-seed` → `COMPLETE`, `numberOfDocumentsScanned=9` (6 seed + 3 prior user uploads), `numberOfNewDocumentsIndexed=6` (all 6 seed docs ingested fresh), `numberOfDocumentsFailed=0`. ✓
+- `scripts/smoke_test.py` → **7/7 PASS** against the freshly-seeded KB. `/query` returned 3 sources + confidence 0.680 from `refund-policy.md`. ✓
+
+### 27.3 Things future-Claude should know about Phase 14
+
+- **Single-stack `cdk deploy StorageStack` overwrites `cdk-outputs.json`** with only StorageStack's outputs — `scripts/smoke_test.py` then complains it can't find AuthStack/ApiStack outputs. Workaround: either deploy with `--all` (the no-diff stacks are no-ops), or regenerate the file from `aws cloudformation describe-stacks` for all 4 stacks. This is a long-standing CDK CLI behavior, unrelated to Phase 14.
+- **Seed docs land at bucket root** (same as `scripts/upload_docs.py`), not under a `seed/` prefix. This preserves eval source-match patterns like `document=refund-policy.md`. If a future session wants to namespace seed vs. user content under different prefixes, update both the BucketDeployment destination prefix AND `tests/eval/questions.json` expected-source patterns.
+- **The 4-minute Lambda timeout** is generous for 6 tiny markdown files (actual ingest takes ~15-20s including poll overhead). If a future seed corpus grows to dozens of MB or PDFs, raise the Lambda timeout (max 15min) and/or the `POLL_DEADLINE_S` constant inside the inline handler.
+- **`scripts/upload_docs.py` + `scripts/start_ingestion.py` are not deleted** — they're still useful for one-off re-ingests without a full `cdk deploy`. README §10.2 documents this fallback.
+
+### 27.4 Cost incurred this phase
+
+~$0.05 total: one `cdk deploy StorageStack` (no docker push — StorageStack has no docker assets), one seed ingestion (6 small markdown files via Titan v2 ≈ $0.001), ~10 Bedrock invocations across smoke + verification. Cumulative project spend across 14 phases is still under **$3.55** of the $20 budget.
+
+---
+
 ## 20. Closing pointer (post-project)
 
 The core project is complete and **production-like deployed** (Phase 13 — live at https://rag-aws-kb.streamlit.app). If you start a new session in this repo:
 
 1. **Read [README.md](README.md) first** — canonical reviewer entry point. §10.0 has the local two-command developer loop; §10.6 has the prod Streamlit Cloud runbook.
-2. Read this handoff doc only if you need historical context: phase-by-phase build log, the two Phase-5 production incidents (§14), the password-sync incident (§24), the prod-deploy details (§25 = Phase 12), or the most-recent UI redesign + sources-persistence work (§26 = Phase 13, **most recent**).
-3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan; the phase status table is current through Phase 13.
+2. Read this handoff doc only if you need historical context: phase-by-phase build log, the two Phase-5 production incidents (§14), the password-sync incident (§24), the prod-deploy details (§25 = Phase 12), the UI redesign + sources-persistence work (§26 = Phase 13), or the most-recent **CDK-native KB pre-seeding work (§27 = Phase 14, most recent)**.
+3. Read [PLAN.md](PLAN.md) only if you need the original implementation plan; the phase status table is current through Phase 14.
 4. **Before assuming the live system is up**, run `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` and `curl -I https://rag-aws-kb.streamlit.app/_stcore/health` — Miguel may have destroyed the stacks to zero cost. If stacks are gone, redeploy + re-paste Streamlit Cloud secrets ([§25.5 of this doc](#255-things-future-claude-should-know-about-phase-12) + [README §10.6](README.md)).
 5. **If Miguel reports auth/login problems locally**, check first that he's launching via `./scripts/run_streamlit.sh` (it auto-syncs `secrets.toml` from live AWS). **If the problem is on the public URL**, it's almost always stale Streamlit Cloud secrets after a redeploy → re-run `python scripts/print_streamlit_cloud_secrets.py | pbcopy` and re-paste.
 6. If asked to extend the project, do not re-litigate decisions in §3 / §21.1 / §22.1 / §25.1 — they are final. Propose new directions but treat the existing architecture as the load-bearing baseline.

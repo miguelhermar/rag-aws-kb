@@ -286,9 +286,8 @@ The S3 key is sanitized to `[A-Za-z0-9._-]` and prefixed with `uploads/{yyyy-mm-
 
 ### 4.1 Ingestion
 
-**Bootstrap** (operator-driven, one-time per deploy):
-1. `scripts/upload_docs.py` syncs `sample-docs/*.md` to S3 (MD5-idempotent).
-2. `scripts/start_ingestion.py` calls `bedrock-agent.StartIngestionJob` and polls every 10s. KB chunks each doc using **FIXED_SIZE 300 tokens with 20% overlap**, embeds with **Titan v2 (1024-dim)**, writes vectors to S3 Vectors. Typical wall-clock: ~10s for 6 docs.
+**Bootstrap** (fully automatic on `cdk deploy`):
+StorageStack uses an `aws_s3_deployment.BucketDeployment` to push `sample-docs/*.md` into the docs bucket on every deploy (`prune=False` so user uploads at `uploads/...` survive), then a Lambda-backed CustomResource (`SeedKnowledgeBase`) calls `bedrock-agent.StartIngestionJob` and polls until `COMPLETE`. KB chunks each doc using **FIXED_SIZE 300 tokens with 20% overlap**, embeds with **Titan v2 (1024-dim)**, writes vectors to S3 Vectors. Typical wall-clock: ~20s for the 6 seed docs. A SHA-256 of the seed corpus is passed as a CR property so unchanged redeploys are no-ops (no wasted Titan embedding spend); changing any seed file triggers a delta ingest. The legacy `scripts/upload_docs.py` + `scripts/start_ingestion.py` are kept for manual re-ingestion but are not required on a fresh deploy.
 
 **Runtime** (`/documents` + `/ingest` + `/ingest/{job_id}`):
 - Same `StartIngestionJob` API as bootstrap, but triggered per-upload by an authenticated user via the REST routes (Phase 9b). `client_token` is auto-generated (`rag-{uuid4-hex}`, 36 chars to satisfy the 33-char minimum) for idempotent retries.
@@ -514,7 +513,11 @@ aws cognito-idp admin-set-user-password --region us-east-1 \
   --password "$(aws secretsmanager get-secret-value --secret-id "$PWD_ARN" --region us-east-1 --query SecretString --output text)"
 ```
 
-### 10.2 Seed the bootstrap corpus (~15s)
+### 10.2 Seed the bootstrap corpus — automatic on `cdk deploy`
+
+StorageStack pre-seeds the KB with `sample-docs/*.md` during deployment (see [§4.1](#41-ingestion)). After `cdk deploy --all` you can go straight to validation; no separate seeding step is required. The KB is queryable immediately.
+
+If you ever need to re-ingest manually (e.g., after editing a sample doc without redeploying, or to re-trigger after a user upload), the legacy scripts still work:
 
 ```bash
 cd .. && source venv/bin/activate
