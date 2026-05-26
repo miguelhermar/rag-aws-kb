@@ -716,6 +716,96 @@ $0. Read-only AWS calls (CFN describe-stacks + Secrets Manager get-secret-value)
 
 ---
 
+## 24. Phase 11 — consistency review + password-sync hardening (2026-05-25 late, post-Phase-10)
+
+Short session, two outputs: closed a long-running doc-vs-reality drift on PLAN.md, and root-caused + fixed the test-user password-sync trap that had haunted every fresh deploy since Phase 8.
+
+### 24.1 The consistency review
+
+Miguel asked for a sanity pass: are PLAN.md, SESSION_HANDOFF.md, README.md, the original brief, the memory files, and the code on disk all consistent with one another? After reading them end-to-end:
+
+- **README.md ↔ SESSION_HANDOFF.md ↔ code tree ↔ memory files**: all aligned. Phase-10 state is reflected uniformly.
+- **Brief compliance**: all "minimum strong submission" capabilities present; 5 of 8 optional extensions delivered + the Cognito JWT bonus; no constraint violations (within $20 budget, no OSS, no SageMaker, CDK in Python, region-pinned).
+- **PLAN.md was severely stale**. It was frozen at the original Phase-1-through-7 vision:
+  - Said "AgentCore: out of scope (README only)" while AgentCore Runtime + Memory are load-bearing.
+  - Described auth as "API Gateway API key + Usage Plan" (removed in Phase 8).
+  - Architecture diagram showed 2 stacks; reality is 4.
+  - Listed `scripts/rotate_api_key.py` (deleted in Phase 8).
+  - Repo layout omitted `agent/`, `lambda_stream/`, `lambda/conversations.py`, `lambda/uploads.py`, `auth_stack.py`, `agent_stack.py`.
+
+**Fix**: full rewrite of [PLAN.md](PLAN.md) (~430 → ~280 lines) to describe the current 4-stack architecture, all 10 phases as a status table, the Lambda-backed password-sync fix (§24.2), and the optional-extensions ledger.
+
+### 24.2 The password-sync root cause + fix
+
+The historical narrative in [[feedback-aws-phase8-gotchas]] #4 + [README §7 #4](README.md) was: "`AwsCustomResource` + `secret_value.unsafe_unwrap()` does not re-fire when the secret rotates → live password and secret diverge silently → `NotAuthorizedException` on first auth." The workaround was a one-line `aws cognito-idp admin-set-user-password` after every fresh deploy.
+
+That narrative was **wrong about the mechanism**. First attempt to "fix" the bug: bind the AwsCustomResource's `physical_resource_id` to the secret ARN so the CR re-fires on fresh deploy. Deployed clean. Smoke test still failed with `NotAuthorizedException`.
+
+Inspected the synthesized CFN template. The `Create` property of `Custom::AWS` contained the JSON string:
+```
+"Password":"{{resolve:secretsmanager:<ARN>:SecretString:::}}"
+```
+Per [AWS docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html): **CFN explicitly does NOT resolve `secretsmanager` dynamic references inside Custom Resource properties.** The literal `{{resolve:...}}` string was being passed verbatim to `AdminSetUserPassword` as the password — every deploy, not just on second deploy. The historical workaround was masking the real bug, not patching around a rotation edge case.
+
+**Proper fix** ([infra/stacks/auth_stack.py:113-175](infra/stacks/auth_stack.py#L113-L175)): replace `AwsCustomResource` with a small Lambda-backed Custom Resource. ~30 lines of inline Python:
+- `SetPasswordFn` (`aws_lambda.Function`, Python 3.12, 30s timeout, log_retention=1 week)
+- Lambda body reads the secret via `boto3.client("secretsmanager").get_secret_value(SecretId=props["SecretArn"])`, then calls `cognito.admin_set_user_password(...)`, then PUTs SUCCESS to the CFN response URL.
+- `CustomResource` with properties `(SecretArn, UserPoolId, Username)`. CFN sends `RequestType=Create`/`Update` on every property diff — and the `SecretArn` value changes whenever the secret is regenerated, so the Lambda re-runs on fresh deploys.
+- IAM: `secret.grant_read(set_password_fn)` + `cognito-idp:AdminSetUserPassword` on the user pool ARN.
+
+### 24.3 Live verification (drift-repair test)
+
+End-to-end proof, performed sequentially against the deployed AuthStack:
+
+1. `aws cognito-idp admin-set-user-password ... --password "Corrupted-Password-9999!"` — deliberately desynced the live Cognito password from the secret value.
+2. `python scripts/get_id_token.py` → `NotAuthorizedException: Incorrect username or password.` ✓ (confirms drift)
+3. `aws lambda invoke --function-name AuthStack-SetPasswordFn... --payload <synthetic CFN Create event>` → `StatusCode: 200`. Lambda read the secret, called `AdminSetUserPassword`, PUT response.
+4. `python scripts/smoke_test.py` → **7/7 PASS** — with no manual `admin-set-user-password` between steps 3 and 4.
+
+This proves the Lambda body works against the live system. On a fresh `cdk destroy --all` + redeploy, CFN will fire the Lambda with `RequestType=Create` and the password will sync automatically — the workaround documented in [§7 of README](README.md) and [§22.4a of this handoff](SESSION_HANDOFF.md) is now unneeded.
+
+### 24.4 Other doc edits this phase
+
+- **[README §1.2](README.md)** — sharpened the AgentCore Runtime rationale. Old framing: "adds runtime memory + managed scaling + console observability." New framing acknowledges: single-tool RAG doesn't *need* AgentCore; the choice was to demonstrate the primitive + ~$0.20–0.50/day idle + adds ~100–300ms hop. Acceptable for demo/interview; pure Lambda is the cheaper choice for real single-tool production.
+- **[README §9 hardening list](README.md)** — added the `agent/rag.py` ↔ `lambda_stream/stream_app.py` duplication risk + suggested a CI lint as the production remediation. The duplication is currently invisible in the docs except for a single line in §1.2.
+- **[README §7 #4](README.md)** — rewritten with the real CFN-dynamic-ref root cause + cross-link to AWS docs. The legacy "rotation doesn't re-fire" framing is gone.
+- **[README §10.1](README.md)** — removed the mandatory `admin-set-user-password` step. The one-liner is preserved as a stop-gap reference but is no longer part of the deploy runbook.
+
+### 24.5 Memory updates this phase
+
+- [[feedback-aws-phase8-gotchas]] gotcha #4 — annotated as resolved in Phase 11 with a pointer to this section + the new auth_stack pattern. The "Workaround" + "Proper fix (not yet applied)" subsections are obsolete; the Lambda-backed CR IS the proper fix.
+
+### 24.6 Live state (end of Phase 11)
+
+All 4 stacks deployed in `us-east-1` / account `954863244564`. AuthStack was redeployed once (Phase 11.2 fix); the other 3 are from the earlier Phase-11 full-redeploy.
+
+```
+StorageStack.KbId                        = 5Y3CYR9DT8
+StorageStack.DocsBucketName              = (read from cdk-outputs.json)
+StorageStack.ConversationsTableName      = (read from cdk-outputs.json)
+StorageStack.MemoryId                    = (read from cdk-outputs.json)
+AuthStack.UserPoolId                     = us-east-1_EWGXyJTdJ
+AuthStack.UserPoolClientId               = 626mrksdt04coo22c47ugbvgih
+AuthStack.UserPoolDomain                 = ragkb-244564
+AgentStack.AgentRuntimeArn               = arn:aws:bedrock-agentcore:us-east-1:954863244564:runtime/rag_aws_agent-PGw5JLEofO
+ApiStack.ApiUrl                          = https://f43kl1i4oa.execute-api.us-east-1.amazonaws.com/prod/
+ApiStack.StreamFunctionUrl               = https://mfrij5ylbikrz5y2f7jxstitya0snugk.lambda-url.us-east-1.on.aws/
+```
+
+`cdk-outputs.json` was regenerated from `aws cloudformation describe-stacks` after the per-stack AuthStack redeploy (single-stack deploy overwrites the outputs file).
+
+### 24.7 Cost incurred this phase
+
+~$0.30 total: 4-stack full redeploy from a destroyed state (docker push + arm64 cross-build dominated), single AuthStack re-update with the Lambda CR fix, ingestion of 6 docs, ~20 Bedrock calls across smoke + drift-repair test. AgentCore Runtime is up and idling at ~$0.20–0.50/day until `cdk destroy --all`. Cumulative project spend across 11 phases is still under **$3** of the $20 budget.
+
+### 24.8 What future-Claude should know about Phase 11
+
+- The password-sync workaround in older docs is now obsolete. If a future session encounters references to "you must run `aws cognito-idp admin-set-user-password` after a fresh deploy", point them at [auth_stack.py:113-175](infra/stacks/auth_stack.py#L113-L175) — that's the actual fix; the workaround is a stop-gap only.
+- `unsafe_unwrap()` of a Secrets Manager secret value will NOT work inside any `Custom::AWS` resource property. If you ever need to pass a secret value to a custom resource, use a Lambda-backed Custom Resource that reads the secret itself via boto3.
+- PLAN.md is now current (Phase 11) and aligned with README + SESSION_HANDOFF. Future phases should update PLAN.md alongside SESSION_HANDOFF.md to keep this from drifting again.
+
+---
+
 ## 20. Closing pointer (post-project)
 
 The core project is complete. If you start a new session in this repo:

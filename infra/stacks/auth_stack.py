@@ -15,11 +15,14 @@ References:
 
 from __future__ import annotations
 
-from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+import textwrap
+
+from aws_cdk import CfnOutput, CustomResource, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as _lambda
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_secretsmanager as secretsmanager
-from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 _TEST_USERNAME = "demo"
@@ -111,46 +114,94 @@ class AuthStack(Stack):
             ],
         )
 
-        set_password = cr.AwsCustomResource(
+        # Lambda-backed custom resource that reads the password from Secrets Manager
+        # at runtime + calls AdminSetUserPassword. We cannot use the simpler
+        # AwsCustomResource pattern with `secret_value.unsafe_unwrap()` because CFN
+        # explicitly does NOT resolve `secretsmanager` dynamic references inside
+        # Custom::AWS resource properties — the literal `{{resolve:...}}` token gets
+        # passed verbatim to AdminSetUserPassword as the password.
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html
+        # The Lambda reads the secret itself via boto3, so the actual value lands on
+        # the user. Re-fires on every deploy where `SecretArn` changes — i.e., after
+        # `cdk destroy --all` (secret regenerated → new ARN suffix → property diff →
+        # CFN sends RequestType=Update or Create → password re-synced).
+        set_password_fn = _lambda.Function(
+            self,
+            "SetPasswordFn",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            timeout=Duration.seconds(30),
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            code=_lambda.Code.from_inline(
+                textwrap.dedent(
+                    """
+                    import json
+                    import urllib.request
+                    import boto3
+
+                    sm = boto3.client("secretsmanager")
+                    cognito = boto3.client("cognito-idp")
+
+                    def handler(event, _ctx):
+                        try:
+                            if event["RequestType"] == "Delete":
+                                return _send(event, "SUCCESS")
+                            props = event["ResourceProperties"]
+                            value = sm.get_secret_value(SecretId=props["SecretArn"])["SecretString"]
+                            cognito.admin_set_user_password(
+                                UserPoolId=props["UserPoolId"],
+                                Username=props["Username"],
+                                Password=value,
+                                Permanent=True,
+                            )
+                            return _send(event, "SUCCESS", {"Synced": "true"})
+                        except Exception as exc:
+                            return _send(event, "FAILED", reason=str(exc))
+
+                    def _send(event, status, data=None, reason=None):
+                        body = json.dumps({
+                            "Status": status,
+                            "Reason": reason or "OK",
+                            "PhysicalResourceId": event.get("PhysicalResourceId")
+                                or event["ResourceProperties"]["SecretArn"],
+                            "StackId": event["StackId"],
+                            "RequestId": event["RequestId"],
+                            "LogicalResourceId": event["LogicalResourceId"],
+                            "Data": data or {},
+                        }).encode("utf-8")
+                        req = urllib.request.Request(
+                            event["ResponseURL"], data=body, method="PUT",
+                        )
+                        req.add_header("Content-Type", "")
+                        req.add_header("Content-Length", str(len(body)))
+                        urllib.request.urlopen(req)
+                    """
+                ).strip()
+            ),
+        )
+        test_password_secret.grant_read(set_password_fn)
+        set_password_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["cognito-idp:AdminSetUserPassword"],
+                resources=[user_pool.user_pool_arn],
+            )
+        )
+
+        set_password = CustomResource(
             self,
             "SetTestUserPassword",
-            on_create=cr.AwsSdkCall(
-                service="CognitoIdentityServiceProvider",
-                action="adminSetUserPassword",
-                parameters={
-                    "UserPoolId": user_pool.user_pool_id,
-                    "Username": _TEST_USERNAME,
-                    "Password": test_password_secret.secret_value.unsafe_unwrap(),
-                    "Permanent": True,
-                },
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{construct_id}-test-user-password"
-                ),
-            ),
-            on_update=cr.AwsSdkCall(
-                service="CognitoIdentityServiceProvider",
-                action="adminSetUserPassword",
-                parameters={
-                    "UserPoolId": user_pool.user_pool_id,
-                    "Username": _TEST_USERNAME,
-                    "Password": test_password_secret.secret_value.unsafe_unwrap(),
-                    "Permanent": True,
-                },
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{construct_id}-test-user-password"
-                ),
-            ),
-            policy=cr.AwsCustomResourcePolicy.from_statements(
-                [
-                    iam.PolicyStatement(
-                        actions=["cognito-idp:AdminSetUserPassword"],
-                        resources=[user_pool.user_pool_arn],
-                    ),
-                ]
-            ),
-            install_latest_aws_sdk=False,
+            service_token=set_password_fn.function_arn,
+            properties={
+                # CFN sees a property diff whenever the secret is regenerated
+                # (new ARN suffix), so the resource fires Update + the password
+                # is re-synced. Same secret across an UPDATE = no diff = no-op.
+                "SecretArn": test_password_secret.secret_arn,
+                "UserPoolId": user_pool.user_pool_id,
+                "Username": _TEST_USERNAME,
+            },
         )
         set_password.node.add_dependency(test_user)
+        set_password.node.add_dependency(test_password_secret)
 
         # --- Cognito-generated App Client secret, persisted for the Streamlit client ---
         # The client secret is created by Cognito (not by CDK), so the only way to expose
