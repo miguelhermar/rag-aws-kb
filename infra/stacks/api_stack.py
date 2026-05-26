@@ -46,6 +46,12 @@ _HAIKU_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0"
 _HAIKU_INFERENCE_PROFILE_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _HAIKU_INFERENCE_REGIONS = ("us-east-1", "us-east-2", "us-west-2")
 
+# Phase 12 — prod Streamlit Community Cloud origin. Local dev origin is kept
+# alongside so `./scripts/run_streamlit.sh` still works against prod stacks.
+_STREAMLIT_CLOUD_ORIGIN = "https://rag-aws-kb.streamlit.app"
+_LOCAL_DEV_ORIGIN = "http://localhost:8501"
+_ALLOWED_ORIGINS = [_LOCAL_DEV_ORIGIN, _STREAMLIT_CLOUD_ORIGIN]
+
 
 class ApiStack(Stack):
     """Lambda + APIGW REST API gated by Cognito JWT, fronting the AgentCore Runtime."""
@@ -127,9 +133,38 @@ class ApiStack(Stack):
                 logging_level=apigw.MethodLoggingLevel.INFO,
                 metrics_enabled=True,
                 tracing_enabled=False,
+                # Phase 12 — stage backstop throttle. Per-method overrides below
+                # tighten the budget-sensitive routes further (/ingest in particular).
+                # Replaces the API-key UsagePlan that was removed in Phase 8.
+                throttling_rate_limit=20,
+                throttling_burst_limit=40,
+                method_options={
+                    "/health/GET": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=20, throttling_burst_limit=40,
+                    ),
+                    "/query/POST": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=10, throttling_burst_limit=20,
+                    ),
+                    "/conversations/GET": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=10, throttling_burst_limit=20,
+                    ),
+                    "/conversations/{session_id}/GET": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=10, throttling_burst_limit=20,
+                    ),
+                    "/documents/POST": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=10, throttling_burst_limit=20,
+                    ),
+                    # /ingest triggers KB embeddings cost; lowest cap.
+                    "/ingest/POST": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=5, throttling_burst_limit=10,
+                    ),
+                    "/ingest/{job_id}/GET": apigw.MethodDeploymentOptions(
+                        throttling_rate_limit=10, throttling_burst_limit=20,
+                    ),
+                },
             ),
             default_cors_preflight_options=apigw.CorsOptions(
-                allow_origins=["http://localhost:8501"],
+                allow_origins=_ALLOWED_ORIGINS,
                 allow_methods=["GET", "POST", "OPTIONS"],
                 allow_headers=["Authorization", "Content-Type"],
             ),
@@ -328,7 +363,7 @@ class ApiStack(Stack):
             auth_type=lambda_.FunctionUrlAuthType.NONE,
             invoke_mode=lambda_.InvokeMode.RESPONSE_STREAM,
             cors=lambda_.FunctionUrlCorsOptions(
-                allowed_origins=["http://localhost:8501"],
+                allowed_origins=_ALLOWED_ORIGINS,
                 allowed_methods=[lambda_.HttpMethod.POST, lambda_.HttpMethod.GET],
                 allowed_headers=["Authorization", "Content-Type"],
                 max_age=Duration.minutes(5),

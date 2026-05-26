@@ -106,7 +106,10 @@ def test_api_stack_has_streaming_function_url(stacks):
             "InvokeMode": "RESPONSE_STREAM",
             "Cors": Match.object_like(
                 {
-                    "AllowOrigins": ["http://localhost:8501"],
+                    "AllowOrigins": [
+                        "http://localhost:8501",
+                        "https://rag-aws-kb.streamlit.app",
+                    ],
                     "AllowHeaders": Match.array_with(["Authorization", "Content-Type"]),
                 }
             ),

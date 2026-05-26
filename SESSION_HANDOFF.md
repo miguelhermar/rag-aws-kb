@@ -806,6 +806,75 @@ ApiStack.StreamFunctionUrl               = https://mfrij5ylbikrz5y2f7jxstitya0sn
 
 ---
 
+## 25. Phase 12 — production-like deploy (2026-05-25 evening)
+
+Elected per [[project-phase12-production-deploy-planned]]. Goal: ship a publicly reachable, prod-shaped version of the system without flipping any of the "real-traffic" knobs (no CI/CD, no VPC, no per-user isolation, no multi-account, no MFA, no billing alarm — all explicitly declined by Miguel as out-of-scope for "production-like, not production").
+
+### 25.1 Locked decisions (Phase 12)
+
+| Area | Choice | Rationale / source |
+|---|---|---|
+| Streamlit hosting | **Streamlit Community Cloud** at `https://rag-aws-kb.streamlit.app` (free, public, GitHub-connected) | Miguel reported AWS App Runner stopped accepting new customers 2026-04-30; ECS Fargate + ALB was overkill (~$25/mo idle vs free). |
+| Custom subdomain | `rag-aws-kb.streamlit.app` (set in Streamlit Cloud UI) | Streamlit Cloud free tier doesn't support custom DNS even if you own one in Route 53. |
+| Cognito callbacks | **Both** localhost + Streamlit Cloud URLs registered on the App Client | Lets `./scripts/run_streamlit.sh` keep working against the prod-shaped stacks. No security cost — localhost URL is only useful from your machine. |
+| Throttling | **Method-level throttling on APIGW** — per-method rate/burst caps + stage backstop 20/40 | Replaces the API-key UsagePlan removed in Phase 8 without re-introducing static keys. /ingest has tightest cap (5/10) since it triggers KB embedding cost. |
+| Billing alarm | None (declined) | Cumulative spend across 12 phases still under $3 of $20 budget. |
+| RemovalPolicy | DESTROY (kept per Miguel's ask) | Miguel wants to be able to `cdk destroy --all` on demand. Accepted trade-off: re-paste Streamlit Cloud secrets after each redeploy. |
+| `autoDeleteObjects` | True on docs bucket (kept) | Same reason as above. |
+| Demo user | Kept (no MFA, no recovery — same as Phase 8) | Not real traffic, single fixture user is fine. |
+| Stack topology | Same 4 stacks, same names, single AWS account `954863244564`, single region `us-east-1` | "Replace dev with prod" — no parallel naming. |
+
+### 25.2 Files (this phase)
+
+**Created**:
+- [scripts/print_streamlit_cloud_secrets.py](scripts/print_streamlit_cloud_secrets.py) — reads live CFN outputs + Secrets Manager, prints TOML to stdout for paste into Streamlit Cloud Secrets editor. Persists `cookie_secret` in `.streamlit_cloud_cookie_secret` (gitignored) so sessions survive re-pastes.
+
+**Edited**:
+- [infra/stacks/api_stack.py](infra/stacks/api_stack.py) — added `_STREAMLIT_CLOUD_ORIGIN`/`_ALLOWED_ORIGINS` constants; method-level throttling via `StageOptions.method_options` on all 7 routes + stage backstop; multi-origin REST CORS preflight; Function URL CORS now allows the Streamlit Cloud origin.
+- [infra/stacks/auth_stack.py](infra/stacks/auth_stack.py) — App Client `callback_urls` + `logout_urls` now include both `http://localhost:8501/...` and `https://rag-aws-kb.streamlit.app/...`.
+- [tests/test_synth.py](tests/test_synth.py) — Function URL CORS assertion updated to expect both origins.
+- [.gitignore](.gitignore) — added `.streamlit_cloud_cookie_secret`.
+- [README.md](README.md) — new §10.6 "Production-like deployment (Streamlit Community Cloud)" + updated §9 to mark APIGW throttling as implemented.
+- [SESSION_HANDOFF.md](SESSION_HANDOFF.md) — this section.
+
+**Not changed**: `agent/`, `lambda/`, `lambda_stream/`, `streamlit_client/app.py`. The Streamlit client reads `st.secrets` the same way whether running locally or on Streamlit Cloud — no code change needed.
+
+### 25.3 Pre-deploy verification
+
+- `cdk synth --all` → clean (4 stacks).
+- `cdk diff AuthStack`: 2 callback URLs + 2 logout URLs added (as planned).
+- `cdk diff ApiStack`: stage backstop throttle + 7 per-method throttle entries + multi-origin CORS preflight templates + Function URL CORS multi-origin (as planned).
+- `cdk diff AgentStack` / `StorageStack`: no differences (untouched, as planned).
+- **Tests: 76/76 PASS** — 59 unit (in `venv/`) + 17 synth (in `infra/.venv/`).
+- Repo audit before GitHub push: no AKIA/AIza/sk-/ghp_/xoxb tokens in tracked files; `.env`, `secrets.toml`, `cdk-outputs.json` all gitignored; `legacy/.streamlit/secrets.toml` is tracked but contains only commented placeholders (safe).
+
+### 25.4 Live verification (pending — see below)
+
+To run after Miguel pushes the repo to public GitHub + completes the one-time Streamlit Cloud setup ([§10.6 of README](README.md)):
+- `cdk deploy --all` against current dev stacks (in-place upgrade — non-destructive).
+- Push to GitHub + connect Streamlit Cloud + set custom subdomain `rag-aws-kb` + paste TOML from `scripts/print_streamlit_cloud_secrets.py`.
+- Browser walkthrough end-to-end on the public URL: login via Cognito Hosted UI → `/query` (REST) → `/query-stream` (SSE) → upload + ingest → list past conversations → log out. Same as [§10.4.1 of README](README.md) but pointed at `rag-aws-kb.streamlit.app` instead of `localhost:8501`.
+
+### 25.5 Things future-Claude should know about Phase 12
+
+- **App Runner is unavailable for new customers since 2026-04-30.** Don't propose it. ECS Fargate + ALB is the AWS-native alternative if Miguel ever wants to host the Streamlit container inside AWS; ~$25/mo idle vs Cloud's free.
+- **Streamlit Cloud secrets are dashboard-managed**, no public API. After every `cdk destroy --all` + redeploy, the user re-runs `scripts/print_streamlit_cloud_secrets.py` and pastes the TOML manually. There is no equivalent of the `run_streamlit.sh` auto-sync for Streamlit Cloud. This is the cost of `RemovalPolicy.DESTROY`.
+- **Cookie secret persistence**: the print-secrets script writes/reads `.streamlit_cloud_cookie_secret` (gitignored) to keep the cookie stable across re-pastes. Don't delete this file casually — losing it invalidates all live Streamlit Cloud sessions.
+- **The Cognito App Client now has 2 callback URLs.** This is fine — Cognito picks the one matching the `redirect_uri` query param at login time. If you ever need to add a third (e.g., a staging environment), keep localhost so local dev keeps working.
+- **Method throttling caps are account-wide per-method**, not per-caller. If you ever see `429 Too Many Requests` in logs from legitimate traffic, raise the limits in `api_stack.py` — but for a demo with one user, the current caps are very generous (10 req/sec sustained on `/query`).
+- **No new AWS resources** were added in Phase 12 — only API Gateway stage-level method settings + Cognito App Client property edits + Function URL property edit. So no new ARNs to track; existing outputs in `cdk-outputs.json` are still the canonical reference.
+
+### 25.6 Cost incurred this phase
+
+~$0.02 — `cdk diff` made a handful of changeset previews; no resource churn beyond the stage settings update. The actual `cdk deploy` happens during live verification (next step).
+
+### 25.7 Memory updates this phase
+
+- New project memory `project-phase12-production-deploy-done` (will be saved after live verification passes).
+- Updated [[project-phase12-production-deploy-planned]] to point at the now-completed Phase 12 record.
+
+---
+
 ## 20. Closing pointer (post-project)
 
 The core project is complete. If you start a new session in this repo:

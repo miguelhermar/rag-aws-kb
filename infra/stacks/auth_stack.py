@@ -26,8 +26,16 @@ from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
 
 _TEST_USERNAME = "demo"
-_CALLBACK_URL = "http://localhost:8501/oauth2callback"
-_LOGOUT_URL = "http://localhost:8501"
+
+# Phase 12 — both local-dev and Streamlit Community Cloud URLs are registered.
+# Cognito accepts an array of callback/logout URLs and the App Client picks the
+# one matching the `redirect_uri` query param at login time, so keeping the
+# localhost entry has no security cost and lets `./scripts/run_streamlit.sh`
+# work against the same prod stacks.
+_LOCAL_CALLBACK_URL = "http://localhost:8501/oauth2callback"
+_LOCAL_LOGOUT_URL = "http://localhost:8501"
+_PROD_CALLBACK_URL = "https://rag-aws-kb.streamlit.app/oauth2callback"
+_PROD_LOGOUT_URL = "https://rag-aws-kb.streamlit.app"
 
 
 class AuthStack(Stack):
@@ -69,8 +77,8 @@ class AuthStack(Stack):
                     cognito.OAuthScope.EMAIL,
                     cognito.OAuthScope.PROFILE,
                 ],
-                callback_urls=[_CALLBACK_URL],
-                logout_urls=[_LOGOUT_URL],
+                callback_urls=[_LOCAL_CALLBACK_URL, _PROD_CALLBACK_URL],
+                logout_urls=[_LOCAL_LOGOUT_URL, _PROD_LOGOUT_URL],
             ),
             prevent_user_existence_errors=True,
             access_token_validity=Duration.hours(1),
