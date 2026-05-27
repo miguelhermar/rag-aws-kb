@@ -111,13 +111,13 @@ class AuthStack(Stack):
 
         test_user = cognito.CfnUserPoolUser(
             self,
-            "TestUser",
+            "DemoUser",
             user_pool_id=user_pool.user_pool_id,
             username=_TEST_USERNAME,
             message_action="SUPPRESS", # No welcome email is sent to the test user.
             user_attributes=[
                 cognito.CfnUserPoolUser.AttributeTypeProperty(
-                    name="email", value="demo@acmenotes.example",
+                    name="email", value="demo@aws-kb.example",
                 ),
             ],
         )
@@ -206,6 +206,7 @@ class AuthStack(Stack):
                 "SecretArn": test_password_secret.secret_arn,
                 "UserPoolId": user_pool.user_pool_id,
                 "Username": _TEST_USERNAME,
+                "ForceUpdateTrigger": "run-number-1",
             },
         )
         set_password.node.add_dependency(test_user)

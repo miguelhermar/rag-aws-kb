@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDK app entry point. Phase 8: StorageStack + AuthStack + AgentStack + ApiStack."""
+"""CDK app entry point. StorageStack + AuthStack + AgentStack + ApiStack."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ auth_stack = AuthStack(
     app,
     "AuthStack",
     env=env,
-    description="RAG-AWS Phase 8: Cognito User Pool + App Client + Hosted UI + test user.",
+    description="RAG-AWS: Cognito User Pool + App Client + Hosted UI + test user.",
 )
 
 agent_stack = AgentStack(
@@ -66,7 +66,7 @@ agent_stack = AgentStack(
     "AgentStack",
     env=env,
     storage_stack=storage_stack,
-    description="RAG-AWS Phase 8: Bedrock AgentCore Runtime (container image).",
+    description="RAG-AWS: Bedrock AgentCore Runtime (container image).",
 )
 agent_stack.add_dependency(storage_stack)
 
@@ -77,7 +77,7 @@ api_stack = ApiStack(
     storage_stack=storage_stack,
     auth_stack=auth_stack,
     agent_stack=agent_stack,
-    description="RAG-AWS Phase 8: Lambda proxy + REST API with Cognito JWT auth.",
+    description="RAG-AWS: Lambda proxy + REST API with Cognito JWT auth.",
 )
 api_stack.add_dependency(storage_stack)
 api_stack.add_dependency(auth_stack)

@@ -176,7 +176,7 @@ class StorageStack(Stack):
             "SeedDocsDeployment",
             sources=[s3deploy.Source.asset(str(_SEED_DIR))],
             destination_bucket=docs_bucket,
-            prune=False,
+            prune=False, # Prevents CDK from deleting existing files in the S3 bucket. If you upload new files, old files not present in your local directory will remain untouched.
             retain_on_delete=False,
         )
 

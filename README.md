@@ -25,7 +25,7 @@ A full ASCII diagram, per-stack breakdown, request-flow narrative, and complete 
 
 ### 1.1 UI
 
-![UI](docs/ui.png)
+![UI](docs/ui-example.png)
 
 Chat input with streaming toggle, past-conversations sidebar with replay-on-click, runtime document upload with progress, Cognito sign-in / sign-out. Built on `st.login()`, `st.chat_message`, `st.dialog`, and `st.file_uploader`.
 

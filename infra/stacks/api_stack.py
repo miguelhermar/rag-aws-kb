@@ -178,7 +178,7 @@ class ApiStack(Stack):
             "CognitoAuthorizer",
             cognito_user_pools=[auth_stack.user_pool],
             identity_source="method.request.header.Authorization",
-            results_cache_ttl=Duration.minutes(5),
+            results_cache_ttl=Duration.minutes(15),
         )
 
         integration = apigw.LambdaIntegration(fn, proxy=True)
@@ -361,6 +361,9 @@ class ApiStack(Stack):
         # Function URL: AuthType=NONE because Streamlit cannot SigV4-sign (no IAM auth); the
         # streaming Lambda re-verifies the Cognito ID token in-handler against
         # the User Pool JWKS. CORS allows the local Streamlit origin only.
+
+        # Because the Streamlit client cannot natively compute AWS cryptographic Signature Version 4 (SigV4) headers dynamically on streaming requests, 
+        # access control is handled inside the Lambda itself.
         stream_function_url = stream_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
             invoke_mode=lambda_.InvokeMode.RESPONSE_STREAM,

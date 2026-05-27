@@ -1,5 +1,3 @@
-# Phase 9a — streaming Lambda container.
-#
 # Native Python Lambda runtime does NOT support response streaming
 # (Node.js only as of 2026-05). The supported pattern is AWS Lambda Web Adapter
 # (LWA): a long-running ASGI server inside the container, with LWA as a Lambda
