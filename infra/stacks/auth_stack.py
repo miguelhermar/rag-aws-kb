@@ -48,7 +48,7 @@ class AuthStack(Stack):
             self,
             "UserPool",
             user_pool_name="rag-aws-users",
-            self_sign_up_enabled=False,
+            self_sign_up_enabled=False, # Random people cannot just visit the site and create an account; an administrator must invite or create them.
             sign_in_aliases=cognito.SignInAliases(username=True, email=False),
             password_policy=cognito.PasswordPolicy(
                 min_length=12,
@@ -114,7 +114,7 @@ class AuthStack(Stack):
             "TestUser",
             user_pool_id=user_pool.user_pool_id,
             username=_TEST_USERNAME,
-            message_action="SUPPRESS",
+            message_action="SUPPRESS", # No welcome email is sent to the test user.
             user_attributes=[
                 cognito.CfnUserPoolUser.AttributeTypeProperty(
                     name="email", value="demo@acmenotes.example",

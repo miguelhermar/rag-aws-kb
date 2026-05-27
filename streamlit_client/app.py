@@ -352,6 +352,7 @@ def _stream_query(question: str, session_id: str, k: int, placeholder):
     for event_name, data in _iter_sse_events(resp):
         if event_name == "meta":
             continue
+        # Streamlit receives each token and updates the placeholder:
         if event_name == "token":
             accumulated_text += data.get("text", "")
             placeholder.markdown(accumulated_text + " ▌")

@@ -15,6 +15,8 @@ Runtime — AgentCore Runtime exposes a buffered Invoke API, not a streaming one
 Memory + DDB writes happen inside the streaming Lambda after the stream ends.
 """
 
+# LWA --> https://aws.amazon.com/es/blogs/compute/using-response-streaming-with-aws-lambda-web-adapter-to-optimize-performance/
+
 from __future__ import annotations
 
 import os
@@ -356,7 +358,7 @@ class ApiStack(Stack):
             stream_fn, "dynamodb:PutItem", "dynamodb:Query"
         )
 
-        # Function URL: AuthType=NONE because Streamlit cannot SigV4-sign; the
+        # Function URL: AuthType=NONE because Streamlit cannot SigV4-sign (no IAM auth); the
         # streaming Lambda re-verifies the Cognito ID token in-handler against
         # the User Pool JWKS. CORS allows the local Streamlit origin only.
         stream_function_url = stream_fn.add_function_url(

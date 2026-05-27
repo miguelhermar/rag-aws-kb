@@ -1,14 +1,92 @@
 # Operator scripts
 
-Three one-shots to populate the Bedrock Knowledge Base and rotate the API key.
-All three read defaults from `../cdk-outputs.json` (produced by `cdk deploy --outputs-file ...`)
-and accept CLI overrides for every value. Stdlib + boto3 only.
+Operator tooling for the current Cognito-authenticated RAG-AWS deployment.
+Most scripts read defaults from `../cdk-outputs.json` or live CloudFormation
+outputs and accept CLI overrides where useful.
 
-Run with the legacy venv's python (boto3 already installed):
+Run Python scripts with the repo venv when available:
 
 ```bash
 /Users/miguelhermar/Desktop/RAG-AWS/venv/bin/python scripts/<name>.py [args]
 ```
+
+## run_streamlit.sh
+
+Syncs `streamlit_client/.streamlit/secrets.toml` from live CloudFormation
+outputs and Secrets Manager, then starts the local Streamlit app.
+
+It configures:
+
+- Cognito OAuth discovery URL
+- App Client ID and secret
+- local redirect URI
+- REST API base URL
+- streaming Function URL
+
+```bash
+./scripts/run_streamlit.sh
+```
+
+Prereqs: `AuthStack` and `ApiStack` deployed, AWS credentials for
+CloudFormation and Secrets Manager, plus `jq`.
+
+## print_streamlit_cloud_secrets.py
+
+Prints the complete TOML block for Streamlit Community Cloud secrets. Use this
+after a fresh deploy or after `cdk destroy --all` plus redeploy, because
+Cognito IDs and generated secrets change.
+
+```bash
+python scripts/print_streamlit_cloud_secrets.py
+python scripts/print_streamlit_cloud_secrets.py --redirect-uri https://example.streamlit.app/oauth2callback
+```
+
+Typical macOS copy flow:
+
+```bash
+python scripts/print_streamlit_cloud_secrets.py | pbcopy
+```
+
+Prereqs: `AuthStack` and `ApiStack` deployed; AWS credentials for
+CloudFormation and Secrets Manager.
+
+## get_id_token.py
+
+Fetches a Cognito ID token for the configured demo user. This is useful for
+manual curl calls and is also used by the smoke test.
+
+```bash
+TOKEN=$(python scripts/get_id_token.py)
+```
+
+By default it reads Cognito and secret ARNs from `cdk-outputs.json`.
+
+Prereqs: `AuthStack` deployed; AWS credentials for Cognito IDP and Secrets
+Manager.
+
+## smoke_test.py
+
+Runs the live end-to-end smoke test for the deployed API.
+
+Checks include:
+
+- unauthenticated `/health`
+- authenticated buffered `/query`
+- missing-token rejection
+- validation error handling
+- conversation listing
+- streaming `/query-stream` over SSE
+- upload, ingestion, and retrieval of a temporary document
+
+```bash
+python scripts/smoke_test.py
+```
+
+By default it reads API and Cognito values from `cdk-outputs.json` and obtains
+a Cognito ID token through `get_id_token.py`.
+
+Prereqs: all four stacks deployed, seed ingestion complete, AWS credentials for
+Secrets Manager and Cognito IDP, and outbound HTTPS access to the deployed API.
 
 ## upload_docs.py
 
@@ -29,7 +107,11 @@ Output:
 3 uploaded, 3 skipped, 6 total
 ```
 
-Prereqs: `cdk deploy StorageStack` complete; AWS creds with `s3:PutObject` + `s3:HeadObject`.
+This is now a manual fallback. Fresh deploys upload seed docs through
+`StorageStack` using `BucketDeployment`.
+
+Prereqs: `StorageStack` deployed; AWS credentials with `s3:PutObject` and
+`s3:HeadObject`.
 
 ## start_ingestion.py
 
@@ -57,99 +139,29 @@ Ingestion COMPLETE
   ...
 ```
 
-Prereqs: docs already uploaded to the docs bucket (run `upload_docs.py` first);
-KB and DataSource in `ACTIVE` / `AVAILABLE` state; AWS creds with
-`bedrock:StartIngestionJob` + `bedrock:GetIngestionJob` on the KB.
+This is now a manual fallback. Fresh deploys trigger seed ingestion through the
+`SeedKnowledgeBase` custom resource in `StorageStack`.
 
-## rotate_api_key.py
+Prereqs: docs already uploaded to the docs bucket, KB and DataSource in
+`ACTIVE` / `AVAILABLE` state, and AWS credentials with
+`bedrock:StartIngestionJob` and `bedrock:GetIngestionJob` on the KB.
 
-Rotates the API key value stored in Secrets Manager. **Does NOT print the new
-value** — fetch it from Secrets Manager afterwards.
-
-```bash
-python scripts/rotate_api_key.py
-python scripts/rotate_api_key.py --secret-arn arn:aws:secretsmanager:...
-```
-
-Output:
-```
-Rotated. New value stored in Secrets Manager.
-
-To propagate to API Gateway:
-  1. cd infra
-  2. Trigger a resource update on the ApiKey so CFN re-resolves the dynamic reference.
-     ...
-```
-
-### Rotation flow — why it's two-step and not one
-
-The CDK `ApiKey` is defined as:
-```python
-api_key = apigw.ApiKey(self, "RagApiKey",
-    value=storage_stack.api_key_secret.secret_value_from_json("apiKey").unsafe_unwrap())
-```
-
-`unsafe_unwrap()` emits a CloudFormation dynamic reference of the form
-`{{resolve:secretsmanager:<arn>:SecretString:apiKey}}`. Per the
-[CFN dynamic references docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-secretsmanager.html),
-this is resolved exactly once when the resource is created/updated. **Rotating the
-secret value in Secrets Manager does not push the new value into API Gateway.**
-
-Per the [API Gateway patch-operations docs](https://docs.aws.amazon.com/apigateway/latest/api/patch-operations.html),
-`UpdateApiKey` does **not** support patching `/value` (supported paths are
-`/customerId`, `/description`, `/enabled`, `/labels`, `/name`, `/stages` only).
-So there is no SDK call that can change an existing API key's value in-place.
-
-Deleting and recreating the API key out-of-band would cause CDK drift — the next
-`cdk deploy` would see the resource missing and try to recreate (or fail).
-
-**Therefore the correct flow is**:
-1. `rotate_api_key.py` updates the Secrets Manager value (source of truth).
-2. Operator runs `cdk deploy ApiStack` with a forced resource update on the ApiKey.
-   A pure no-op deploy will not re-resolve the dynamic reference; CFN only re-reads
-   it when the resource itself is updated.
-
-Concrete recipe to force the resource update:
-```bash
-cd infra
-# Edit infra/stacks/api_stack.py: add description="rotated-YYYY-MM-DD" to apigw.ApiKey(...)
-cdk deploy ApiStack --outputs-file ../cdk-outputs.json
-# Verify the rotated key works:
-NEW_KEY=$(aws secretsmanager get-secret-value --secret-id <ARN> \
-  --region us-east-1 --query SecretString --output text | python -c 'import sys,json;print(json.load(sys.stdin)["apiKey"])')
-curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<api>/prod/query \
-  -H "x-api-key: $NEW_KEY" -H "Content-Type: application/json" \
-  -d '{"question":"test","top_k":1}'
-# Should print 200. Then revert the description bump on the next normal deploy.
-```
-
-Prereqs: AWS creds with `secretsmanager:PutSecretValue` on the secret ARN, and
-CDK creds for the `cdk deploy ApiStack` step.
-
-## Typical workflow (clean account → end-to-end working RAG)
+## Typical workflow (clean account -> end-to-end working RAG)
 
 ```bash
-# 0. Bootstrap + initial deploy (Phase 2 + 4)
+# 0. Bootstrap + deploy all stacks
 cd infra
 cdk bootstrap aws://<acct>/us-east-1
-cdk deploy StorageStack ApiStack --outputs-file ../cdk-outputs.json
+cdk deploy --all --outputs-file ../cdk-outputs.json
 
-# 1. Populate the docs bucket and trigger ingestion (Phase 5)
+# 1. Run local Streamlit against the deployed stacks
 cd ..
+./scripts/run_streamlit.sh
+
+# 2. Smoke-test the live API
+python scripts/smoke_test.py
+
+# 3. Optional manual fallback if you need to re-upload/re-ingest sample docs
 python scripts/upload_docs.py
 python scripts/start_ingestion.py
-
-# 2. Smoke-test the API end-to-end (Phase 4 contract, now with real docs)
-API_URL=$(jq -r '.ApiStack.ApiUrl' cdk-outputs.json)
-SECRET_ARN=$(jq -r '.StorageStack.ApiKeySecretArn' cdk-outputs.json)
-API_KEY=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" \
-  --region us-east-1 --query SecretString --output text \
-  | python -c 'import sys,json;print(json.load(sys.stdin)["apiKey"])')
-curl -X POST "${API_URL}query" \
-  -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
-  -d '{"question":"What is the refund policy?","top_k":3}' | jq .
-
-# 3. (Optional) Rotate the API key
-python scripts/rotate_api_key.py
-# then follow the recipe in "Rotation flow" above
 ```
