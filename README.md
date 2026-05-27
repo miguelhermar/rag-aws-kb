@@ -12,7 +12,7 @@ This repository is a productionization of a Streamlit + Gemini + FAISS prototype
 
 ## 1. Architecture
 
-![Architecture](docs/architecture.png)
+![Architecture](docs/rag-aws-architecture.svg)
 
 A reviewer's machine runs the Streamlit client (or hits the public Streamlit Cloud URL). On sign-in, Cognito issues an ID JWT that the client sends as `Authorization: Bearer …` on every backend call. Two parallel paths handle questions:
 
