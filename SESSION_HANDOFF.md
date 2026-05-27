@@ -8,14 +8,13 @@
 
 **Previous milestone**: 2026-05-25 (evening), **Phase 12 — production-like deploy** (verified live): the 4 CDK stacks were updated in place to add APIGW per-method throttling + multi-origin CORS + Cognito callback URLs for **Streamlit Community Cloud**. The Streamlit client is publicly reachable at **https://rag-aws-kb.streamlit.app**, hosted free on Streamlit Cloud (AWS App Runner stopped accepting new customers 2026-04-30; see [[feedback-aws-apprunner-unavailable]]). End-to-end browser walkthrough confirmed by Miguel. See §25. The local dev loop (`./scripts/run_streamlit.sh` from Phase 10) still works against the same prod stacks.
 
-**Important**: the stacks are deployed in account `954863244564` / region `us-east-1` and the system is live at the URL above. If Miguel runs `cdk destroy --all`, every Cognito ID + API URL + App Client secret rotates — the *local* launcher auto-syncs on next run, but the Streamlit Cloud secrets must be re-pasted manually from `scripts/print_streamlit_cloud_secrets.py`. README §10.6 covers the post-redeploy ritual.
+**Important**: the stacks are deployed in the AWS account / region `us-east-1` and the system is live at the URL above. If Miguel runs `cdk destroy --all`, every Cognito ID + API URL + App Client secret rotates — the *local* launcher auto-syncs on next run, but the Streamlit Cloud secrets must be re-pasted manually from `scripts/print_streamlit_cloud_secrets.py`. README §10.6 covers the post-redeploy ritual.
 
 ---
 
 ## 1. Orientation — read these files in this order
 
 1. **[PLAN.md](PLAN.md)** — the canonical implementation plan. All architectural decisions, phase breakdown, risks, hardening notes. Treat this as the source of truth for what we're building and why.
-2. **[AWS Native Knowledge Base Agent Candidate Project Brief.md](AWS%20Native%20Knowledge%20Base%20Agent%20Candidate%20Project%20Brief.md)** — the original take-home brief. Re-read constraints (§"AWS Environment & Budget Guidelines", §6, §7) before making any architectural call.
 3. **This file** — current state, live resource IDs, gotchas, next moves.
 4. **[legacy/README.md](legacy/README.md)** — what the original prototype was and why it's preserved.
 
@@ -124,29 +123,11 @@ This fix is NOT yet committed. The repo working tree has the fix; if no commit h
 
 ## 8. Live AWS state (as of 2026-05-24 evening, end of Phase 6)
 
-**Account**: `954863244564`, IAM user `admin_user`, region `us-east-1`.
-
 **StorageStack — deployed, `CREATE_COMPLETE`, 14 resources, ~62s wall-clock.**
 
 **ApiStack — deployed, 22 resources `CREATE_COMPLETE`, ~70s wall-clock (docker layer cache warm).**
 
-Outputs written to [cdk-outputs.json](cdk-outputs.json) (gitignored). DO NOT memorize specific IDs — they rotate on every redeploy. Read from `cdk-outputs.json` via `jq` and from Secrets Manager for the API key. The current values as of this writing:
-```
-# StorageStack
-KbId            = LA8DA5P7HH
-KbArn           = arn:aws:bedrock:us-east-1:954863244564:knowledge-base/LA8DA5P7HH
-DataSourceId    = UNMM05LJHV
-DocsBucketName  = storagestack-docsbucketecea003f-u6kkxkfltmgj
-DocsBucketArn   = arn:aws:s3:::storagestack-docsbucketecea003f-u6kkxkfltmgj
-VectorBucketArn = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564
-VectorIndexArn  = arn:aws:s3vectors:us-east-1:954863244564:bucket/rag-aws-vectors-244564/index/rag-aws-kb-index
-ApiKeySecretArn = arn:aws:secretsmanager:us-east-1:954863244564:secret:ApiKeySecretF1B08E61-0nj3ocgfH4cZ-iifl5w
-
-# ApiStack
-ApiUrl              = https://id04zftvx5.execute-api.us-east-1.amazonaws.com/prod/
-LambdaFunctionName  = ApiStack-RagHandler014AF978-2DxedjA9s4yl
-LogGroupName        = /aws/lambda/ApiStack-RagHandler
-```
+Outputs written to [cdk-outputs.json](cdk-outputs.json) (gitignored). DO NOT memorize specific IDs — they rotate on every redeploy. Read from `cdk-outputs.json` via `jq` and from Secrets Manager for the API key. 
 
 **Live status verified via CLI + curl + scripts/smoke_test.py + tests/eval/run_eval.py (2026-05-24 evening, end of Phase 6)**:
 - KB `LA8DA5P7HH` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
@@ -161,7 +142,7 @@ LogGroupName        = /aws/lambda/ApiStack-RagHandler
 **User pre-flight done before deploy**:
 - Bedrock model access for Titan v2 (`amazon.titan-embed-text-v2:0`) is `ACTIVE` in us-east-1.
 - Haiku 4.5 inference profile `us.anthropic.claude-haiku-4-5-20251001-v1:0` is `ACTIVE` and does not require Marketplace subscription.
-- `cdk bootstrap aws://954863244564/us-east-1` (CDKToolkit stack exists, unchanged across redeploys).
+- `cdk bootstrap aws://<accountID>/us-east-1` (CDKToolkit stack exists, unchanged across redeploys).
 
 **Cost incurred so far this session (Phase 6)**: ~$0.10 (full redeploy: docker push to ECR + ingestion + smoke runs + 8-question eval). Idle cost going forward ≈$0.40/month (Secrets Manager flat fee + ECR storage). Active cost: ~$0.0003 per `/query` (Haiku tokens dominate; APIGW + Lambda compute are rounding error). Cumulative project total still well under $1 of the $20 budget.
 
@@ -177,7 +158,7 @@ cd /Users/miguelhermar/Desktop/RAG-AWS
 source infra/.venv/bin/activate
 
 # Sanity-check creds match the deployed account
-aws sts get-caller-identity   # should show account 954863244564
+aws sts get-caller-identity   # should show account ID
 
 # Verify StorageStack is still healthy
 aws cloudformation describe-stacks --stack-name StorageStack --region us-east-1 \
@@ -403,7 +384,7 @@ The README is the single source of truth for any future reader (reviewer or futu
 
 - They asked to "leverage the compact skill" but there is no literal `/compact` skill — interpret as "write a dense session handoff".
 - They prefer terse, opinionated responses over menus.
-- They have given standing authorization to deploy to their AWS account `954863244564/us-east-1`. Always confirm before destructive operations (`cdk destroy`, `aws s3 rb`).
+- They have given standing authorization to deploy to their AWS account. Always confirm before destructive operations (`cdk destroy`, `aws s3 rb`).
 - They appreciate cost transparency — quote idle/active costs when proposing AWS actions.
 - They're using VS Code; file references should be markdown links `[name.ext](relative/path)`.
 - They sometimes `cdk destroy` between sessions to zero out idle cost — at session start, always run `aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --region us-east-1` (or just `jq` on `cdk-outputs.json` + a `describe-stacks` call) to confirm whether StorageStack/ApiStack are still up before assuming any live IDs are valid.
@@ -484,20 +465,7 @@ StorageStack ──────────► AuthStack
 
 ### 21.4 Live verification (2026-05-25 mid-day)
 
-All 4 stacks deployed to `us-east-1` in account `954863244564`. Live IDs (rotate per redeploy — don't memorize):
-```
-StorageStack.KbId                        = 8KTVKJ0AGP
-StorageStack.MemoryId                    = rag_aws_memory-SXdKtfB2bB
-StorageStack.ConversationsTableName      = StorageStack-ConversationsTableCD91EB96-1NKWGKEAWPPV9
-StorageStack.DocsBucketName              = storagestack-docsbucketecea003f-u5ihxkjkalvx
-AuthStack.UserPoolId                     = us-east-1_F4uFIQdMN
-AuthStack.UserPoolClientId               = 6n2reutf71tjagf89a4kr7v9h3
-AuthStack.UserPoolClientSecretArn        = arn:aws:secretsmanager:us-east-1:954863244564:secret:UserPoolClientSecretB552B17-cmf2WLdTjruU-DkTLWV
-AuthStack.TestUserPasswordSecretArn      = arn:aws:secretsmanager:us-east-1:954863244564:secret:TestUserPassword306D299E-slMnSP83lIZh-pus0vb
-AuthStack.UserPoolDomain                 = ragkb-244564
-AgentStack.AgentRuntimeArn               = arn:aws:bedrock-agentcore:us-east-1:954863244564:runtime/rag_aws_agent-QYzNKQBlPZ
-ApiStack.ApiUrl                          = https://qf915n6z4i.execute-api.us-east-1.amazonaws.com/prod/
-```
+All 4 stacks deployed to `us-east-1` in the AWS account.
 
 Verification evidence:
 - `cdk synth` all 4 stacks → clean.
@@ -582,19 +550,6 @@ Elected from §19's optional-extension menu on 2026-05-25. Brief: "streaming res
 ### 22.3 Live verification (2026-05-25 late afternoon)
 
 Single `cdk deploy --all` from a destroyed state. Wall-clock ~7 minutes (StorageStack ~70s, AuthStack ~30s, AgentStack arm64 cross-build ~3min, ApiStack 2 docker images + 7 routes ~70s). Cost: ~$0.15 (docker pushes + ingest + ~20 Bedrock calls across all tests).
-
-Live IDs (rotate per redeploy — don't memorize):
-```
-StorageStack.KbId                        = FEEZNZ2QE1
-StorageStack.MemoryId                    = rag_aws_memory-52pVoQCM56
-StorageStack.ConversationsTableName      = StorageStack-ConversationsTableCD91EB96-1CYAHXGPN2BEO
-StorageStack.DocsBucketName              = storagestack-docsbucketecea003f-tknaqlt2gvwz
-AuthStack.UserPoolId                     = us-east-1_wlw5ZVNk1
-AuthStack.UserPoolClientId               = 2thda93iqaq2ef8jqfhrum3kpv
-AgentStack.AgentRuntimeArn               = arn:aws:bedrock-agentcore:us-east-1:954863244564:runtime/rag_aws_agent-JGO2zh9z27
-ApiStack.ApiUrl                          = https://o2jci6mjmc.execute-api.us-east-1.amazonaws.com/prod/
-ApiStack.StreamFunctionUrl               = https://psotssgrgjsi3dc735w4j3azfm0gcqrd.lambda-url.us-east-1.on.aws/
-```
 
 Verification evidence:
 - `cdk synth --all` clean throughout development.
@@ -781,20 +736,7 @@ This proves the Lambda body works against the live system. On a fresh `cdk destr
 
 ### 24.6 Live state (end of Phase 11)
 
-All 4 stacks deployed in `us-east-1` / account `954863244564`. AuthStack was redeployed once (Phase 11.2 fix); the other 3 are from the earlier Phase-11 full-redeploy.
-
-```
-StorageStack.KbId                        = 5Y3CYR9DT8
-StorageStack.DocsBucketName              = (read from cdk-outputs.json)
-StorageStack.ConversationsTableName      = (read from cdk-outputs.json)
-StorageStack.MemoryId                    = (read from cdk-outputs.json)
-AuthStack.UserPoolId                     = us-east-1_EWGXyJTdJ
-AuthStack.UserPoolClientId               = 626mrksdt04coo22c47ugbvgih
-AuthStack.UserPoolDomain                 = ragkb-244564
-AgentStack.AgentRuntimeArn               = arn:aws:bedrock-agentcore:us-east-1:954863244564:runtime/rag_aws_agent-PGw5JLEofO
-ApiStack.ApiUrl                          = https://f43kl1i4oa.execute-api.us-east-1.amazonaws.com/prod/
-ApiStack.StreamFunctionUrl               = https://mfrij5ylbikrz5y2f7jxstitya0snugk.lambda-url.us-east-1.on.aws/
-```
+All 4 stacks deployed in `us-east-1`. AuthStack was redeployed once (Phase 11.2 fix); the other 3 are from the earlier Phase-11 full-redeploy.
 
 `cdk-outputs.json` was regenerated from `aws cloudformation describe-stacks` after the per-stack AuthStack redeploy (single-stack deploy overwrites the outputs file).
 
@@ -826,7 +768,7 @@ Elected per [[project-phase12-production-deploy-planned]]. Goal: ship a publicly
 | RemovalPolicy | DESTROY (kept per Miguel's ask) | Miguel wants to be able to `cdk destroy --all` on demand. Accepted trade-off: re-paste Streamlit Cloud secrets after each redeploy. |
 | `autoDeleteObjects` | True on docs bucket (kept) | Same reason as above. |
 | Demo user | Kept (no MFA, no recovery — same as Phase 8) | Not real traffic, single fixture user is fine. |
-| Stack topology | Same 4 stacks, same names, single AWS account `954863244564`, single region `us-east-1` | "Replace dev with prod" — no parallel naming. |
+| Stack topology | Same 4 stacks, same names, single AWS account, single region `us-east-1` | "Replace dev with prod" — no parallel naming. |
 
 ### 25.2 Files (this phase)
 

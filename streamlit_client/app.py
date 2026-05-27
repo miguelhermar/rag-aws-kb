@@ -47,7 +47,7 @@ _patch_cognito_logout()
 
 REQUEST_TIMEOUT_S = 30
 TOKEN_REFRESH_LEEWAY_S = 60
-APP_NAME = "Knowledge Base"
+APP_NAME = "AWS Knowledge Base"
 
 st.set_page_config(
     page_title=APP_NAME,

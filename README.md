@@ -257,7 +257,6 @@ Full deploy / validate / tear-down / Streamlit Cloud deployment steps: **[docs/R
 | [docs/](docs/) | [ARCHITECTURE](docs/ARCHITECTURE.md), [RUNBOOK](docs/RUNBOOK.md), [HARDENING](docs/HARDENING.md). |
 | [PLAN.md](PLAN.md) | Original implementation plan (phases, decisions, risks). |
 | [SESSION_HANDOFF.md](SESSION_HANDOFF.md) | Dense state-of-project doc, updated per phase. |
-| [AWS Native Knowledge Base Agent Candidate Project Brief.md](AWS%20Native%20Knowledge%20Base%20Agent%20Candidate%20Project%20Brief.md) | Original take-home brief. |
 | [sample-docs/](sample-docs/) | 6 Markdown bootstrap docs. |
 | [infra/](infra/) | CDK app (4 stacks). See [infra/README.md](infra/README.md). |
 | [lambda/](lambda/) | Buffered Lambda handler (RIC image). Routes 7 endpoints. |

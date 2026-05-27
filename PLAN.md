@@ -183,7 +183,6 @@ legacy/                               Original Gemini + FAISS + Streamlit protot
 README.md                             Reviewer-facing entry point
 SESSION_HANDOFF.md                    Per-phase build log + live IDs + gotchas
 PLAN.md                               This file
-AWS Native Knowledge Base Agent Candidate Project Brief.md
 ```
 
 ## CDK design
