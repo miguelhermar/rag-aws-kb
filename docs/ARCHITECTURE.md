@@ -201,7 +201,7 @@ The CDK app at [infra/app.py](../infra/app.py) deploys four stacks in dependency
 }
 ```
 
-`conversation_name` is LLM-generated on the first turn of a session (3–5 words, ≤50 chars) and persisted to DDB. On turns 2+ it is `null` and the existing DDB row is not overwritten.
+`conversation_name` is LLM-generated on the first turn of a session after the assistant answer is available (3–5 words, ≤50 chars, based on the user question + answer) and persisted to DDB. On turns 2+ it is `null` and the existing DDB row is not overwritten.
 
 ### 4.4 `/query-stream` SSE wire format
 
@@ -303,7 +303,7 @@ Every turn writes **one event** to AgentCore Memory under `(actor_id, session_id
 ]
 ```
 
-`is_first_turn` is detected by `list_events(maxResults=1)`. On first turn only, the agent writes a single DDB row with `conversation_name` + `created_at` (Unix epoch int). Sidebar reads from DDB (fast `Query`); replay reads from Memory (paginated `ListEvents`).
+`is_first_turn` is detected by `list_events(maxResults=1)`. On first turn only, after the assistant answer is generated, the agent writes a single DDB row with `conversation_name` + `created_at` (Unix epoch int). Sidebar reads from DDB (fast `Query`); replay reads from Memory (paginated `ListEvents`).
 
 A third `blob` payload item carries base64-encoded JSON: `{sources, confidence, latency_ms, model_id, retrieval_strategy}`. On replay, [lambda/conversations.py](../lambda/conversations.py) decodes that sidecar and attaches it as a `payload` field on the ASSISTANT message so the UI can re-render the confidence badge + sources expander, not just the answer text. (Base64 is a workaround for an AgentCore Memory Document-type round-trip quirk — see Gotcha #7 below.)
 

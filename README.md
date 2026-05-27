@@ -98,7 +98,7 @@ confidence = clamp(0.6·max(scores) + 0.3·mean(scores) + 0.1·(1 − stdev(scor
 
 Top-match score dominates (60%); mean rewards consistent matching (30%); stdev penalty prefers tight clusters over a single outlier hit.
 
-**Per-session memory** — every turn writes **one event** to AgentCore Memory under `(actor_id, session_id)` in the native `conversational` shape (USER + ASSISTANT items) plus a base64-encoded `blob` sidecar with `{sources, confidence, latency_ms, model_id}` so reloading a past conversation can re-render the full assistant payload (not just text). On first turn only, the agent writes one DDB row with an LLM-generated `conversation_name` (3–5 words) for sidebar listing.
+**Per-session memory** — every turn writes **one event** to AgentCore Memory under `(actor_id, session_id)` in the native `conversational` shape (USER + ASSISTANT items) plus a base64-encoded `blob` sidecar with `{sources, confidence, latency_ms, model_id}` so reloading a past conversation can re-render the full assistant payload (not just text). On first turn only, after the assistant answer is available, the agent writes one DDB row with an LLM-generated `conversation_name` (3–5 words) based on the user question + answer for sidebar listing.
 
 Prompt, confidence formula, and Memory shape detail: [docs/ARCHITECTURE.md §5](docs/ARCHITECTURE.md#5-rag-behavior).
 

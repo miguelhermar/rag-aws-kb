@@ -137,7 +137,7 @@ def test_generate_conversation_name_truncates_to_50_chars():
     long_title = "A" * 200
     with Stubber(agent_rag.runtime) as stub:
         stub.add_response("invoke_model", _claude_body(long_title))
-        name = agent_rag.generate_conversation_name("any prompt")
+        name = agent_rag.generate_conversation_name("any prompt", "any answer")
     assert len(name) <= 50
     assert name == "A" * 50
 
@@ -145,8 +145,30 @@ def test_generate_conversation_name_truncates_to_50_chars():
 def test_generate_conversation_name_strips_quotes():
     with Stubber(agent_rag.runtime) as stub:
         stub.add_response("invoke_model", _claude_body('"Refund Policy Question"'))
-        name = agent_rag.generate_conversation_name("refunds?")
+        name = agent_rag.generate_conversation_name("refunds?", "Monthly plans have a 14 day window.")
     assert name == "Refund Policy Question"
+
+
+def test_generate_conversation_name_uses_prompt_and_answer(monkeypatch):
+    captured = {}
+
+    def fake_invoke(prompt, model_arn, system, max_tokens):
+        captured["prompt"] = prompt
+        captured["model_arn"] = model_arn
+        captured["system"] = system
+        captured["max_tokens"] = max_tokens
+        return "Refund Window"
+
+    monkeypatch.setattr(agent_rag, "invoke_claude", fake_invoke)
+
+    name = agent_rag.generate_conversation_name(
+        "refunds?",
+        "Monthly plans can be refunded within 14 days.",
+    )
+
+    assert name == "Refund Window"
+    assert "User message: refunds?" in captured["prompt"]
+    assert "Assistant answer: Monthly plans can be refunded within 14 days." in captured["prompt"]
 
 
 def test_save_conversation_metadata_swallows_conditional_check_failed():

@@ -238,11 +238,12 @@ def _invoke_claude_buffered(prompt: str, system: str, max_tokens: int = 32) -> s
     return "".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
 
 
-def _generate_conversation_name(prompt: str) -> str:
+def _generate_conversation_name(prompt: str, answer: str) -> str:
     instruction = (
-        "Generate a 3-5 word title (max 50 chars) for this user message. "
+        "Generate a 3-4 word title (max 40 chars) for this first conversation turn. "
+        "Use both the user's message and the assistant's answer, and prefer the specific topic over generic wording. "
         "Reply with only the title, no quotes. "
-        f"Message: {prompt}"
+        f"User message: {prompt}\n\nAssistant answer: {answer}"
     )
     title = _invoke_claude_buffered(instruction, TITLE_SYSTEM_PROMPT, max_tokens=32)
     title = title.strip('"\'').strip()
@@ -416,7 +417,7 @@ async def query_stream(request: Request, authorization: Optional[str] = Header(d
                 )
                 conversation_name = None
                 if first_turn:
-                    conversation_name = _generate_conversation_name(req.question)
+                    conversation_name = _generate_conversation_name(req.question, final_answer)
                     _save_conversation_metadata(actor_id, session_id, conversation_name)
                 yield _sse(
                     "done",
@@ -473,7 +474,7 @@ async def query_stream(request: Request, authorization: Optional[str] = Header(d
             )
             conversation_name = None
             if first_turn:
-                conversation_name = _generate_conversation_name(req.question)
+                conversation_name = _generate_conversation_name(req.question, final_answer)
                 _save_conversation_metadata(actor_id, session_id, conversation_name)
             log.info(
                 "stream.success",

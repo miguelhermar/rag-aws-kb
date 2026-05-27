@@ -143,11 +143,12 @@ def write_memory(
     )
 
 
-def generate_conversation_name(prompt: str) -> str:
+def generate_conversation_name(prompt: str, answer: str) -> str:
     instruction = (
-        "Generate a 3-5 word title (max 50 chars) for this user message. "
+        "Generate a 3-4 word title (max 40 chars) for this first conversation turn. "
+        "Use both the user's message and the assistant's answer, and prefer the specific topic over generic wording. "
         "Reply with only the title, no quotes. "
-        f"Message: {prompt}"
+        f"User message: {prompt}\n\nAssistant answer: {answer}"
     )
     title = invoke_claude(instruction, MODEL_ARN, system=TITLE_SYSTEM_PROMPT, max_tokens=32).strip()
     title = title.strip('"\'').strip()
@@ -221,7 +222,7 @@ def run_query(
 
     conversation_name = None
     if first_turn:
-        conversation_name = generate_conversation_name(prompt)
+        conversation_name = generate_conversation_name(prompt, answer)
         save_conversation_metadata(CONVERSATIONS_TABLE, actor_id, session_id, conversation_name)
 
     return {

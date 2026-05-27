@@ -241,7 +241,7 @@ Four stacks in [infra/stacks/](infra/stacks/) with in-memory cross-stack refs (N
    - `bedrock-runtime.invoke_model(MODEL_ARN, messages, max_tokens=800, temperature=0.1)`
    - If `answer.strip().startswith("INSUFFICIENT_CONTEXT")` → canned `"I don't have information about that in the knowledge base."` + confidence clamped to ≤ 0.2.
    - Confidence: `clamp(0.6·max(scores) + 0.3·mean(scores) + 0.1·(1 − stdev(scores)), 0, 1)`
-   - On first turn (`list_events(maxResults=1)` empty): LLM-generate `conversation_name` (3–5 words, ≤50 chars) and `PutItem` to DDB.
+   - On first turn (`list_events(maxResults=1)` empty): after the assistant answer is available, LLM-generate `conversation_name` from the user question + answer (3–5 words, ≤50 chars) and `PutItem` to DDB.
    - One `CreateEvent` on Memory per turn with native `conversational` payload (USER + ASSISTANT items).
 4. Lambda returns the response wrapped in `QueryResponse`.
 
