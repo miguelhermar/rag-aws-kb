@@ -294,7 +294,7 @@ Each phase ran as a tight, self-contained brief sent to a `general-purpose` sub-
 ## Auth wiring
 
 - CDK creates the User Pool, App Client (with secret), Hosted UI domain, and one pre-created `demo` user.
-- The test-user password is generated into Secrets Manager. `AwsCustomResource` calls `AdminSetUserPassword`; `physical_resource_id` is the secret's ARN so a fresh deploy after `cdk destroy --all` re-fires the call automatically (no manual `admin-set-user-password` ritual needed — Phase 11 hardening fix).
+- The test-user password is generated into Secrets Manager. A small **Lambda-backed Custom Resource** reads the secret via `boto3.client("secretsmanager").get_secret_value(...)` at runtime and calls `AdminSetUserPassword` (Phase 11 hardening fix — the original `AwsCustomResource` + `secret_value_from_json().unsafe_unwrap()` pattern was broken in this context because CFN does not resolve `secretsmanager` dynamic references inside Custom Resource properties, so the literal `{{resolve:...}}` string was being passed verbatim as the password). The CR re-fires on every fresh deploy after `cdk destroy --all` via its ARN-bound `physical_resource_id` (no manual `admin-set-user-password` ritual needed).
 - App Client secret copied into a Secrets Manager secret for launcher consumption.
 - [scripts/run_streamlit.sh](scripts/run_streamlit.sh) reads `aws cloudformation describe-stacks` (AuthStack + ApiStack) + Secrets Manager → rewrites `streamlit_client/.streamlit/secrets.toml` → `exec`s Streamlit. **The reviewer never edits `secrets.toml` by hand.**
 - Streamlit calls `st.login()` → Cognito Hosted UI → callback to `http://localhost:8501/oauth2callback` → ID token on `st.user.tokens["id"]`. Sent as `Authorization: Bearer …` on every backend call.
@@ -338,7 +338,7 @@ Unit + synth tests: ~76 pytest cases across `tests/test_schemas.py` (pydantic), 
 - Secrets via Secrets Manager (no plaintext in synth output); CDK source is the only allowed change path
 - `autoDeleteObjects=True` + `RemovalPolicy.DESTROY` for clean teardown
 - Streaming UX + runtime upload + ingestion with progress feedback
-- AwsCustomResource secret-rotation fix (Phase 10): `physical_resource_id` bound to secret ARN so the test-user password syncs automatically on fresh deploy
+- Lambda-backed test-user password sync (Phase 11): a small Custom Resource reads the secret at runtime and calls `AdminSetUserPassword`, replacing the broken `AwsCustomResource` + `unsafe_unwrap()` pattern. ARN-bound `physical_resource_id` re-fires on fresh deploy.
 
 **Documented but not implemented** — production roadmap:
 
