@@ -206,7 +206,6 @@ class AuthStack(Stack):
                 "SecretArn": test_password_secret.secret_arn,
                 "UserPoolId": user_pool.user_pool_id,
                 "Username": _TEST_USERNAME,
-                "ForceUpdateTrigger": "run-number-1",
             },
         )
         set_password.node.add_dependency(test_user)
