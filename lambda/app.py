@@ -67,6 +67,7 @@ def _pad_session_id(session_id: str) -> str:
 
 
 def handler(event, context):
+    print(json.dumps(event, indent=4))
     start = time.perf_counter()
     request_id = str(uuid.uuid4())
     log = _logger.bind(request_id=request_id)
