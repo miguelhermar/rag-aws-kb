@@ -130,8 +130,8 @@ This fix is NOT yet committed. The repo working tree has the fix; if no commit h
 Outputs written to [cdk-outputs.json](cdk-outputs.json) (gitignored). DO NOT memorize specific IDs — they rotate on every redeploy. Read from `cdk-outputs.json` via `jq` and from Secrets Manager for the API key. 
 
 **Live status verified via CLI + curl + scripts/smoke_test.py + tests/eval/run_eval.py (2026-05-24 evening, end of Phase 6)**:
-- KB `LA8DA5P7HH` → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
-- DataSource `UNMM05LJHV` → status `AVAILABLE`, chunking `FIXED_SIZE`; **6/6 sample-docs ingested** ✅
+- KB (from `cdk-outputs.json`) → status `ACTIVE`, storage `S3_VECTORS`, embed Titan v2 ✅
+- DataSource (from `cdk-outputs.json`) → status `AVAILABLE`, chunking `FIXED_SIZE`; **6/6 sample-docs ingested** ✅
 - Docs bucket → 6 `.md` files uploaded via `scripts/upload_docs.py` (idempotent) ✅
 - Vector index `rag-aws-kb-index` → dim=1024, metric=cosine, dtype=float32 ✅
 - API key secret → exists; value `{"apiKey": "<32 alnum chars>"}` (never printed) ✅
@@ -221,7 +221,7 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verifie
 **Verification confirmed (2026-05-24)**:
 - `python -m pytest tests/test_schemas.py tests/test_rag.py -v` → **23 passed in 0.24s** (Claude re-ran in `venv/`, independent of agent's run)
 - `docker build -t rag-lambda:phase3 .` → green (agent's run; not re-verified by Claude since image rebuild is slow and not load-bearing)
-- `grep` for hardcoded `QWM9CGVIJL`/account/secrets across `lambda/` + `tests/` → **0 matches**, all env-driven
+- `grep` for hardcoded KB IDs / account IDs / secrets across `lambda/` + `tests/` → **0 matches**, all env-driven
 
 ---
 
@@ -238,7 +238,7 @@ Done by sub-agent (`general-purpose` type) on 2026-05-24, then trust-but-verifie
 1. **Explicit `LogGroup` instead of `log_retention=` param**: avoids CDK provisioning a `Custom::LogRetention` framework Lambda, which would have meant 2× `AWS::Lambda::Function` in the stack and broken the "exactly 1 Lambda" assertion. Functionally identical, strictly cleaner.
 2. **Smoke-test API-key extraction**: agent used `jq` against `cdk-outputs.json` rather than the hard-coded ARN in the brief, since the StorageStack ARN had rotated. API key was held in a shell variable only; never printed.
 
-**Live verification (2026-05-24)** — three curl smoke tests against `https://i93jgleje5.execute-api.us-east-1.amazonaws.com/prod/`:
+**Live verification (2026-05-24)** — three curl smoke tests against the deployed `ApiUrl` (from `cdk-outputs.json`):
 - `GET /health` → `200 {"status":"ok"}` ✅
 - `POST /query` without `x-api-key` → `403 {"message":"Forbidden"}` ✅ (auth wired)
 - `POST /query` with valid key + sample question → `200`, schema-valid JSON, `confidence=0.0`, `sources=[]`, `answer="I don't have information about that in the knowledge base."` ✅ — this is the **expected** behaviour: docs haven't been ingested yet, KB returns 0 chunks, INSUFFICIENT_CONTEXT override fires. Confirms the wiring end-to-end (APIGW → Lambda → Bedrock Retrieve → Bedrock InvokeModel → response). Phase 5 will upload docs + start an ingestion job and the same curl should then return a real grounded answer.
@@ -481,7 +481,7 @@ Verification evidence:
 
 Three issues surfaced during live deploy; all fixed.
 
-**Incident A — Cognito UserPoolDomain reserved-prefix.** Initial `domain_prefix = f"rag-aws-{account[-6:]}"` failed: Cognito rejects prefixes containing `aws`, `amazon`, or `cognito`. Fixed to `ragkb-244564` in [auth_stack.py:78-79](infra/stacks/auth_stack.py#L78-L79). One-line change; redeploy succeeded.
+**Incident A — Cognito UserPoolDomain reserved-prefix.** Initial `domain_prefix = f"rag-aws-{account[-6:]}"` failed: Cognito rejects prefixes containing `aws`, `amazon`, or `cognito`. Fixed to `ragkb-{account-suffix}` in [auth_stack.py:78-79](infra/stacks/auth_stack.py#L78-L79). One-line change; redeploy succeeded.
 
 **Incident B — AgentCore Runtime is arm64-only.** Sub-agent A set `platform=ecr_assets.Platform.LINUX_AMD64`; AgentCore rejected the image with `Supported platforms: [arm64]`. Fixed to `LINUX_ARM64` in [agent_stack.py:52](infra/stacks/agent_stack.py#L52). **Generalizable lesson**: AgentCore Runtime is arm64-only. Bake this into any future `CfnRuntime` work. (Verified post-fix: docker buildx builds linux/arm64 cross-arch from my x86 Mac via Docker Desktop's emulation — slower first build, but works.)
 
@@ -615,12 +615,12 @@ Short session. No infra, no Bedrock, no AWS billable changes. The two-command de
 
 Miguel opened Streamlit and clicked **Log in with Cognito** → generic "authentication error" on the page. Root cause was diagnosed live in this session: `streamlit_client/.streamlit/secrets.toml` was frozen at Phase 8 IDs. The Phase 9 `cdk destroy --all` + redeploy had rotated every Cognito and API ID:
 
-| Field | Stale (Phase 8) | Live (Phase 9) |
+| Field | Stale (pre-redeploy) | Live (post-redeploy) |
 |---|---|---|
-| `UserPoolId` | `us-east-1_F4uFIQdMN` | `us-east-1_wlw5ZVNk1` |
-| `UserPoolClientId` | `6n2reutf71tjagf89a4kr7v9h3` | `2thda93iqaq2ef8jqfhrum3kpv` |
+| `UserPoolId` | previous deploy value | rotated |
+| `UserPoolClientId` | previous deploy value | rotated |
 | App Client secret | old | refetched from Secrets Manager |
-| `ApiUrl` | `qf915n6z4i...` | `o2jci6mjmc...` |
+| `ApiUrl` | previous deploy value | rotated |
 | `[stream]` section | missing entirely | now present |
 
 Streamlit was POSTing the OIDC discovery request to a user pool that no longer exists → Cognito 404 → Streamlit surfaces it as "authentication error". No AWS-side fix needed; just the secrets file.
@@ -653,7 +653,7 @@ No `--outputs-file` flag needed. No manual `secrets.toml` editing, ever.
 ### 23.4 Verification
 
 - Dry-ran the launcher locally: `secrets.toml` rewritten was byte-identical to the hand-fixed version that got login working. `diff` clean.
-- Cognito sanity checks done before declaring success: OIDC discovery doc on `us-east-1_wlw5ZVNk1` resolves; Hosted UI domain `ragkb-244564` exists; App Client `2thda93iqaq2ef8jqfhrum3kpv` has `http://localhost:8501/oauth2callback` whitelisted, `code` flow, `openid email profile` scopes. The "Log in with Cognito" button works end-to-end after the secrets sync (Miguel confirmed live).
+- Cognito sanity checks done before declaring success: OIDC discovery doc on the current `UserPoolId` resolves; Hosted UI domain `ragkb-{account-suffix}` exists; App Client has `http://localhost:8501/oauth2callback` whitelisted, `code` flow, `openid email profile` scopes. The "Log in with Cognito" button works end-to-end after the secrets sync (Miguel confirmed live).
 - `chmod +x scripts/run_streamlit.sh` applied.
 
 ### 23.5 Cost incurred this phase
@@ -875,7 +875,7 @@ End-to-end evidence (verified by Miguel in browser):
 - `scripts/smoke_test.py` → 7/7 PASS after final deploy. ✓
 - 37 unit tests + 17 synth tests pass. ✓
 - `cdk diff StorageStack AuthStack`: 0 differences (Phase 13 didn't touch them). ✓
-- ApiStack URLs unchanged (`u8czd0hetb...`, `hoofegy2phbjzrh4w4pgj42bgu0cecor.lambda-url...`) — both deploys were in-place container updates, not resource replacements.
+- ApiStack URLs unchanged across both deploys — in-place container updates, not resource replacements.
 
 ### 26.4 The AgentCore Memory blob round-trip quirk (codified)
 
@@ -935,7 +935,7 @@ Short session. One-file infra change so `cdk deploy --all` produces a chat-ready
 - 79/79 tests pass (59 unit + 20 synth, +3 new).
 - `cdk diff StorageStack` was purely additive: 1 `Custom::CDKBucketDeployment` + 1 `AwsCliLayer` (BucketDeployment internals) + `SeedIngestionFn` + `SeedKnowledgeBase` CR + 1 LogRetention helper + 1 tag added to DocsBucket (`aws-cdk:cr-owned:<hash>`, BucketDeployment marker). No replacements. Other 3 stacks unchanged.
 - `cdk deploy StorageStack` → `UPDATE_COMPLETE` in 145s.
-- Ingestion job `E565VE8FEV` description `cdk-seed` → `COMPLETE`, `numberOfDocumentsScanned=9` (6 seed + 3 prior user uploads), `numberOfNewDocumentsIndexed=6` (all 6 seed docs ingested fresh), `numberOfDocumentsFailed=0`. ✓
+- Ingestion job (description `cdk-seed`) → `COMPLETE`, `numberOfDocumentsScanned=9` (6 seed + 3 prior user uploads), `numberOfNewDocumentsIndexed=6` (all 6 seed docs ingested fresh), `numberOfDocumentsFailed=0`. ✓
 - `scripts/smoke_test.py` → **7/7 PASS** against the freshly-seeded KB. `/query` returned 3 sources + confidence 0.680 from `refund-policy.md`. ✓
 
 ### 27.3 Things future-Claude should know about Phase 14

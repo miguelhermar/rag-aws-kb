@@ -1,6 +1,6 @@
 # RAG-AWS Eval Results
 
-- API: `https://oueklb9vf8.execute-api.us-east-1.amazonaws.com/prod`
+- API: `<ApiUrl from cdk-outputs.json>`
 - top_k: 5
 - Questions: 8
 

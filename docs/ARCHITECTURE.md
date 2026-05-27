@@ -234,9 +234,9 @@ PUT  <upload_url>           (client → S3 directly, must echo same Content-Type
 
 POST /ingest
 {"key": "uploads/2026-05-25/abc-engineering-roadmap.md", "client_token": null}
-→ 200 {"job_id": "26EXBYYLCZ", "status": "STARTING"}
+→ 200 {"job_id": "<job-id>", "status": "STARTING"}
 
-GET  /ingest/26EXBYYLCZ
+GET  /ingest/<job-id>
 → 200 {"job_id": "…", "status": "COMPLETE", "statistics": {"scanned": 8, "indexed": 1, "failed": 0}}
 ```
 
