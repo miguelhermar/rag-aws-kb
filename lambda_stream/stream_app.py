@@ -360,6 +360,7 @@ async def query_stream(request: Request, authorization: Optional[str] = Header(d
     # --- body parsing (failures return JSON, not SSE) ----------------------
     try:
         raw = await request.json()
+        log.info("request.body", body=raw)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}")
     try:
