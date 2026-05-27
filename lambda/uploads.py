@@ -8,7 +8,7 @@ Upload flow:
      or S3 rejects with SignatureDoesNotMatch (verified via boto3 docs).
   2. PUT (client -> S3) — no Lambda involvement.
   3. POST /ingest { key, client_token? }
-     -> validates the key is one we minted (prefix check)
+     -> validates the key is one we issued (prefix check)
      -> calls bedrock-agent.StartIngestionJob with clientToken for idempotency
      -> returns { job_id, status }
   4. GET /ingest/{job_id}

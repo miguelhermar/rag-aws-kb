@@ -14,12 +14,12 @@ This repository is a productionization of a Streamlit + Gemini + FAISS prototype
 
 ![Architecture](docs/rag-aws-architecture.svg)
 
-A reviewer's machine runs the Streamlit client (or hits the public Streamlit Cloud URL). On sign-in, Cognito issues an ID JWT that the client sends as `Authorization: Bearer …` on every backend call. Two parallel paths handle questions:
+Upon signing in via the Streamlit client, Cognito issues an ID JWT that the client includes as a `Authorization: Bearer …` header on every backend call. Two parallel paths handle questions:
 
 - **Buffered `/query`** — API Gateway REST → Lambda (proxy) → AgentCore Runtime (arm64 container) → Retrieve (KB) + InvokeModel (Haiku 4.5) → response.
 - **Streaming `/query-stream`** — Lambda Function URL (SSE) → streaming Lambda (LWA + uvicorn) → `InvokeModelWithResponseStream` → token-by-token SSE frames.
 
-Both paths write one event per turn to AgentCore Memory and a metadata row to DynamoDB (first turn only). Document uploads use a presigned S3 PUT URL minted by Lambda; ingestion is triggered via a separate `/ingest` route that calls `bedrock-agent.StartIngestionJob`.
+Both paths write one event per turn to AgentCore Memory and a metadata row to DynamoDB (first turn only). Document uploads use a presigned S3 PUT URL issued by Lambda; ingestion is triggered via a separate `/ingest` route which invokes the `bedrock-agent.StartIngestionJob` API.
 
 A full ASCII diagram, per-stack breakdown, request-flow narrative, and complete API contract live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

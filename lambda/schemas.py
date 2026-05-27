@@ -36,7 +36,7 @@ class IngestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # The S3 object key the client just PUT to (returned from /documents).
-    # Server-side we re-validate the prefix to confirm it's an upload we minted.
+    # Server-side we re-validate the prefix to confirm it's an upload we issued.
     key: str = Field(min_length=1, max_length=1024)
     # Optional idempotency token. If omitted the handler generates one; if
     # provided it is passed through to StartIngestionJob.clientToken so retries
