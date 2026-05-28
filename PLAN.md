@@ -8,7 +8,7 @@
 
 The starting point was a working RAG prototype: a single-process Streamlit app that did Gemini embeddings + FAISS retrieval + Gemini generation, plus a partial FastAPI/Next.js stack. Single-user, no IaC, no auth, leaked Gemini key in `.env`. Preserved under [legacy/](legacy/) for diff.
 
-The deliverable is an **AWS-native, CDK-deployed, authenticated, source-grounded RAG service** queried from a local Streamlit client over HTTPS — under a **$20 hard budget**, no OpenSearch Serverless, no SageMaker, per the [original brief](AWS%20Native%20Knowledge%20Base%20Agent%20Candidate%20Project%20Brief.md).
+The deliverable is an **AWS-native, CDK-deployed, authenticated, source-grounded RAG service** queried from a local Streamlit client over HTTPS — under a **$20 hard budget**, no OpenSearch Serverless, no SageMaker, per the original brief.
 
 The implementation went beyond the brief minimum by electing five of the listed optional extensions: Cognito JWT auth, DynamoDB chat history, Amazon Bedrock AgentCore Runtime, AgentCore Memory, streaming responses, and an upload + ingestion endpoint.
 
